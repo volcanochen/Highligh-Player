@@ -26,6 +26,19 @@
 
 <!-- 主内容 -->
 <div id="appWrap">
+<!-- 分享兜底：系统没把链接传过来时（折叠屏外屏分享实测会遇到）显示，
+     让用户直接粘贴 BV/短链，而不是对着空白页发呆 -->
+<div id="shareFallback" hidden>
+  <div class="sf-card">
+    <div class="sf-title">没能从分享里读到 B 站链接</div>
+    <div class="sf-sub" id="sfRaw"></div>
+    <div class="sf-row">
+      <input id="sfInput" type="text" placeholder="粘贴 BV 号 / b23.tv 短链 / bilibili 链接" spellcheck="false">
+      <button class="sf-go" id="sfGo">解析</button>
+    </div>
+    <button class="sf-close" id="sfClose">关闭</button>
+  </div>
+</div>
 <main id="app" class="app">
 
   <!-- 左/主 列：播放器 + 标题 + 控制 -->
@@ -37,10 +50,13 @@
         <!-- 全屏叠层按钮（仅全屏显示） -->
         <button class="fs-btn" id="fsExit" title="退出全屏">✕</button>
         <button class="fs-btn" id="fsLock" title="锁定">🔒</button>
+        <button class="fs-btn" id="fsKeep" title="常显：控制条不再自动隐藏">📍</button>
+        <!-- 常驻细进度条：控制条淡出后仍能看出播到哪里（不参与自动隐藏） -->
+        <div id="fsBar"><div id="fsBarFill"></div></div>
         <!-- 中心播放/暂停闪现 -->
         <div class="center-play" id="centerPlay">▶</div>
         <!-- 拖动进度预览 -->
-        <div class="seek-preview" id="seekPreview"></div>
+        <div class="seek-preview" id="seekPreview">↔ 0:00</div>
 
         <div class="veil" id="veil">
           <div class="veil-spin"></div>

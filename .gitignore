@@ -24,3 +24,6 @@ Thumbs.db
 # ---- 运行时临时文件 ----
 _comments_raw.json
 *.log
+
+# ---- 测试产物 ----
+_test/out/

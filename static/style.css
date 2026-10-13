@@ -129,14 +129,18 @@ audio { display: none; }
 .placeholder .ph-title { color: #d2d6dd; font-size: 13px; margin: 0 0 4px; font-weight: 600; }
 .placeholder .ph-sub { color: #8c93a0; font-size: 11px; margin: 0; line-height: 1.5; }
 
-/* veil */
+/* veil —— 只用于「真的在等网络」的场景（首播 / 缓冲不足 / 手动乱跳）。
+   段末连播走的是预热硬切，不会亮这个遮罩。 */
 .veil {
   position: absolute; top: 0; left: 0; right: 0; bottom: 0; z-index: 8;
   display: none; flex-direction: column; align-items: center; justify-content: center;
   background: rgba(10, 11, 13, .72);
   color: #cdd5e2;
+  opacity: 0;
+  -webkit-transition: opacity .14s ease-out; transition: opacity .14s ease-out;
 }
-.veil.on { display: flex; }
+/* 先淡入再显示：避免 display 切换造成的瞬间黑闪 */
+.veil.on { display: flex; opacity: 1; }
 .veil-spin {
   width: 24px; height: 24px; border-radius: 50%;
   border: 2px solid rgba(255, 255, 255, .12);
@@ -188,6 +192,40 @@ audio { display: none; }
 .auto-status {
   margin-top: 6px; font-size: 11.5px; color: var(--text-2);
   background: var(--accent-soft); border-radius: 6px; padding: 5px 8px;
+}
+
+/* ---------- 分享兜底（外屏分享读不到链接时） ---------- */
+#shareFallback {
+  position: fixed; left: 0; right: 0; top: 0; bottom: 0; z-index: 60;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(0,0,0,.62);
+  padding: 16px;
+}
+#shareFallback[hidden] { display: none; }
+.sf-card {
+  width: 100%; max-width: 420px;
+  background: var(--panel); border-radius: 12px; padding: 14px;
+  box-shadow: 0 10px 30px rgba(0,0,0,.4);
+}
+.sf-title { font-size: 14px; font-weight: 600; color: var(--text); margin-bottom: 6px; }
+.sf-sub {
+  font-size: 11.5px; color: var(--text-3); line-height: 1.5;
+  max-height: 76px; overflow: auto; word-break: break-all;
+  background: var(--panel-2); border-radius: 6px; padding: 6px 8px; margin-bottom: 10px;
+}
+.sf-row { display: flex; margin-bottom: 8px; }
+.sf-row input {
+  flex: 1; min-width: 0; height: 32px; padding: 0 9px;
+  border: 1px solid var(--line); border-radius: 6px 0 0 6px;
+  background: var(--panel-2); color: var(--text); font-size: 12.5px; outline: none;
+}
+.sf-go {
+  height: 32px; padding: 0 14px; border: none; cursor: pointer;
+  background: var(--accent); color: #fff; font-size: 12.5px; border-radius: 0 6px 6px 0;
+}
+.sf-close {
+  width: 100%; height: 30px; border: 1px solid var(--line); border-radius: 6px;
+  background: transparent; color: var(--text-2); font-size: 12px; cursor: pointer;
 }
 
 /* ---------- 控制条 ---------- */
@@ -413,6 +451,23 @@ textarea#text:focus { border-color: var(--accent); }
   .ctl.vol { width: 60px; }
 }
 
+/* ---------- 外屏 / 极窄视口 ----------
+   折叠屏外屏可用宽度很窄，此时不再按比例缩到很小（会糊到看不清），
+   改为直接用窄屏排版：卡片更紧凑、控制条折行、时间轴更矮。
+   由 applyViewportScale 在 scale 触底时给 body 加 .vp-narrow。 */
+body.vp-narrow .app { padding: 8px 8px 52px; }
+body.vp-narrow .player-wrap { border-radius: 8px; }
+body.vp-narrow .ctrl-card { padding: 6px 7px; }
+body.vp-narrow .ibtn { width: 28px; height: 28px; font-size: 11px; margin-right: 4px; }
+body.vp-narrow .ibtn.play { width: 32px; height: 32px; font-size: 12px; }
+body.vp-narrow .nowseg { max-width: 84px; font-size: 11px; }
+body.vp-narrow .ctl { font-size: 11px; margin-right: 5px; }
+body.vp-narrow .ctl select { height: 22px; font-size: 11px; }
+body.vp-narrow .ctl.vol { width: 62px; }
+body.vp-narrow .ribbon { height: 20px; }
+body.vp-narrow .vtitle { font-size: 14px; }
+body.vp-narrow .fs-btn { width: 32px; height: 32px; font-size: 14px; line-height: 32px; }
+
 /* ============================================================
    全屏 / 横屏模式（body.fullscreen）
    播放器铺满屏幕，控制条 + 时间轴变为半透明叠加层，3 秒无操作自动隐藏。
@@ -439,7 +494,7 @@ body.fullscreen .player-wrap {
 }
 body.fullscreen .player { top: 0; left: 0; right: 0; bottom: 0; }
 
-/* 全屏叠层按钮：退出 / 锁定（常驻，不参与自动隐藏） */
+/* 全屏叠层按钮：退出 / 锁定 / 常显（常驻，不参与自动隐藏） */
 .fs-btn {
   position: absolute; z-index: 30; top: 8px;
   width: 38px; height: 38px; border-radius: 50%;
@@ -448,8 +503,26 @@ body.fullscreen .player { top: 0; left: 0; right: 0; bottom: 0; }
   display: none; cursor: pointer;
 }
 #fsExit { left: 10px; }
-#fsLock { right: 10px; }
+#fsLock { right: 52px; }
+#fsKeep { right: 10px; }
 body.fullscreen .fs-btn { display: block; }
+/* 常显开启时给常显按钮一个高亮，避免用户不知道当前是常显还是自动隐藏 */
+body.fs-keep #fsKeep { background: var(--accent); }
+
+/* 常驻细进度条：控制条 .fs-hide 淡出后它仍然可见，
+   解决「播放时进度条自己消失」的观感问题 */
+#fsBar {
+  position: absolute; left: 0; right: 0; bottom: 0; z-index: 29;
+  height: 3px; display: none;
+  background: rgba(255,255,255,.22);
+  pointer-events: none;
+}
+body.fullscreen #fsBar { display: block; }
+#fsBarFill {
+  height: 100%; width: 0%;
+  background: var(--accent);
+  -webkit-transition: width .1s linear; transition: width .1s linear;
+}
 
 /* 中心播放/暂停闪现 */
 .center-play {
@@ -494,10 +567,11 @@ body.fullscreen .ctl { color: #e8e8e8; }
 body.fullscreen .ctl select { background: rgba(255,255,255,.12); color: #fff; border-color: rgba(255,255,255,.25); }
 body.fullscreen .ribbon { background: rgba(255,255,255,.22); }
 
-/* 自动隐藏：加 fs-hide 时整体淡出 */
+/* 自动隐藏：加 fs-hide 时整体淡出。
+   注意 #fsBar 不在隐藏列表里 —— 它是常驻进度指示，控制条淡出后仍在。 */
 body.fs-hide .ctrl-card,
 body.fs-hide .ribbon-card { opacity: 0; pointer-events: none; }
-/* 锁定时隐藏所有叠加（仅留解锁按钮） */
+/* 锁定时隐藏所有叠加（仅留解锁按钮）；常驻进度条保留，仍能看出播到哪里 */
 body.fs-lock .ctrl-card,
 body.fs-lock .ribbon-card { opacity: 0 !important; pointer-events: none; }
 

@@ -26,9 +26,10 @@ var el = {
   statLeft: $('#statLeft'), statRight: $('#statRight'),
   nowseg: $('#nowseg'),
   centerPlay: $('#centerPlay'),
-  fsExit: $('#fsExit'), fsLock: $('#fsLock'),
-  seekPreview: $('#seekPreview'),
+  fsExit: $('#fsExit'), fsLock: $('#fsLock'), fsKeep: $('#fsKeep'), fsBar: $('#fsBar'),
+  fsBarFill: $('#fsBarFill'), seekPreview: $('#seekPreview'),
   resume: $('#resume'), resumeText: $('#resumeText'), resumeGo: $('#resumeGo'), resumeReset: $('#resumeReset'),
+  shareFallback: $('#shareFallback'), sfRaw: $('#sfRaw'), sfInput: $('#sfInput'), sfGo: $('#sfGo'), sfClose: $('#sfClose'),
 };
 
 var S = {
@@ -39,7 +40,8 @@ var S = {
   qn: 80, page: 1, lastSwitchAt: 0, lastSync: 0, lastHud: 0, audioBlocked: false,
   resolving: false,
   decks: [], parsed: null,
-  uiMode: 'normal', muted: false, locked: false,
+  uiMode: 'normal', muted: false, locked: false, keepUi: false,
+  gesturing: false, scrubbing: false,
   resumeInfo: null, sharedTitle: null, lastPosSave: 0,
 };
 
@@ -131,6 +133,28 @@ function showErr(msg) {
   el.errLayer.hidden = false;
 }
 function hideErr() { el.errLayer.hidden = true; }
+
+/* ---------------------- 分享兜底（读不到链接时） ---------------------- */
+/**
+ * 原生在 handleIntent 没能抽出 B 站链接时调用。
+ * 触发场景实测主要是折叠屏外屏分享：外屏 Sharesheet 可能只传了标题、只传了缩略图，
+ * 或者把链接塞在 text/html 的 href 里而系统没透传过来。
+ * 此时必须给用户一条出路（手动粘贴），否则表现就是"点了分享毫无反应"。
+ */
+function showShareFallback(raw) {
+  if (!el.shareFallback) return;
+  el.sfRaw.textContent = raw ? ('收到的分享内容：' + raw) : '收到的分享内容为空';
+  el.shareFallback.hidden = false;
+  try { el.sfInput.focus(); } catch (e) {}
+  reportDiag('share-fallback raw=' + (raw || '').slice(0, 80));
+}
+function submitFallback() {
+  var v = (el.sfInput.value || '').trim();
+  if (!v) { setStatus('err', '请先粘贴链接或 BV 号'); return; }
+  el.shareFallback.hidden = true;
+  setStatus('busy', '解析中');
+  resolveVideo(v);
+}
 
 /* ---------------------- localStorage 安全封装 ---------------------- */
 function safeGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
@@ -393,6 +417,8 @@ async function prepare(d, i, lead) {
   if (!seg || !S.token) return false;
   var t = Math.max(0, seg.start - lead);
   d.seg = i; d.ready = false; d.rolling = false; d.lead = lead;
+  // 先停掉可能正在预热的旧播放，否则换 src 后旧音频会继续外放
+  try { d.v.pause(); if (S.hasAudio) d.a.pause(); } catch (e) {}
   setSrc(d.v, '/api/media/' + S.token + '/v?i=0');
   if (S.hasAudio) setSrc(d.a, '/api/media/' + S.token + '/a?i=0');
 
@@ -413,12 +439,51 @@ async function prepare(d, i, lead) {
   return true;
 }
 
-function showDeck(k) {
+/**
+ * 预热起播：下一段在「当前段还在播」时就静音滚动起来。
+ * 这是让段末切换像分镜一样自然的关键——
+ *   旧写法：切换时才开始加载 → 必须显示转圈遮罩 → 观众明确看到「卡了一下」
+ *   新写法：画面早已在另一层就位，切换只是把它显示出来 → 硬切，无黑帧、无转圈
+ * 音频必须保持 muted，否则会出现两段声音重叠。
+ */
+async function warmDeck(d) {
+  if (!d || !d.ready) return false;
+  // readyState<3 (HAVE_FUTURE_DATA) 说明还没拿到可显示帧，此时起播只会播黑，
+  // 宁可等到切换时再播（那时才需要 veil）
+  if (d.v.readyState < 3) return false;
+  d.rolling = true;
+  d.v.muted = true;
+  if (S.hasAudio) d.a.muted = true;
+  try { await d.v.play(); } catch (e) { return false; }
+  if (S.hasAudio) { try { await d.a.play(); } catch (e) {} }
+  return true;
+}
+
+/**
+ * 显示第 k 个 deck。
+ * hard=true 时（段末硬切）走「立即切换」：不加过渡，保证切换点没有残影；
+ * hard=false 时（首播/手动跳段）走 160ms 淡入，掩盖首次解码的黑帧。
+ */
+function showDeck(k, hard) {
   S.active = k;
   S.decks.forEach(function (d, i) {
-    d.el.classList.toggle('on', i === k);
+    var on = (i === k);
+    if (on) {
+      if (hard) {
+        // 先清掉过渡再置 on，避免与上一镜的淡出状态叠加产生中间灰帧
+        d.el.style.transition = 'none';
+        d.el.style.opacity = '1';
+        d.el.classList.add('on');
+        void d.el.offsetWidth;   // 强制回流，让下面的 transition 生效于「之后」的改动
+        d.el.style.transition = '';
+      } else {
+        d.el.classList.add('on');
+      }
+    } else {
+      d.el.classList.remove('on');
+    }
     d.v.muted = true;
-    d.a.muted = (i !== k) || !S.hasAudio || S.muted;
+    d.a.muted = !on || !S.hasAudio || S.muted;
     d.a.volume = clamp(S.vol, 0, 1);
     d.v.playbackRate = S.rate;
     d.a.playbackRate = S.rate;
@@ -451,18 +516,71 @@ function prepareNext() {
   var d = otherDeck();
   S.pendingIdx = j;
   var lead = Math.min(S.lead, S.segs[j].start);
-  S.preparing = prepare(d, j, lead);
+  // 提前量：不是"提前 0.35s 就位"，而是要覆盖 lead 秒的时长，
+  // 这样预热的 deck 在切换瞬间已经播到 seg.start 附近，硬切才不会有跳帧感。
+  var warmLead = Math.min(Math.max(S.lead, 0.6), Math.max(0, S.segs[j].start));
+  S.preparing = prepare(d, j, warmLead).then(function (ok) {
+    // prepare 成功就立刻静音起播，让浏览器把解码器/渲染管线全部预热，
+    // 切换时只需解除静音并显示，不再有「第一帧卡住」
+    if (ok) warmDeck(d);
+    return ok;
+  });
 }
 
+/**
+ * 切换到第 i 段。
+ *
+ * 【原来的问题】段末连播也走同一条路径：veil(true) 显示转圈遮罩 → prepare 重新加载
+ * → sleep(120) → veil(false)。即使 prepareNext() 已经把下一段准备好了也会重做一遍，
+ * 于是每切一段都必然闪一次「载入中」遮罩 + 黑屏，观众看到的是一卡一卡的跳变。
+ *
+ * 【现在的做法】分两条路径：
+ *   fastCut  —— 目标 deck 已 ready 且有可显示帧：直接硬切，不显示任何遮罩。
+ *              这就是「分镜」：上一镜结束的那一帧，下一镜已经在画面上了。
+ *   slowPath —— 首播 / 缓冲不足 / 用户手动乱跳：才需要 veil 兜底，
+ *              并且只在等待超过 400ms 后才显示，避免一闪而过更难看。
+ */
 async function jumpTo(i, opts) {
   opts = opts || {};
   if (S.busy || i < 0 || i >= S.segs.length || !S.token) return;
-  S.busy = true;
-  veil(true, opts.text || ('载入第 ' + (i + 1) + ' 段'));
+
+  // ---- 快速路径：已预热，直接硬切 ----
   var d = otherDeck();
+  if (d.seg === i && d.ready && d.v.readyState >= 3) {
+    S.busy = true;
+    S.idx = i;
+    S.pendingIdx = -1;
+    S.lastSwitchAt = performance.now();
+    showDeck(S.decks.indexOf(d), true);   // 硬切：不加过渡，避免残影
+    setStatus('busy', '播放中');
+    // 预热阶段 audio 是 muted，这里恢复正常并对齐音画
+    await startDeck(d);
+    S.playing = true;
+    updateToggle();
+    el.placeholder.classList.add('hide');
+    el.errLayer.hidden = true;
+    veil(false);
+    S.busy = false;
+    updateUI(true);
+    updateFsBar();
+    revealFsControls(true);
+    prepareNext();
+    console.log('[cut] fast idx=' + i + ' t=' + d.v.currentTime.toFixed(2));
+    return;
+  }
+
+  // ---- 慢路径：需要真的加载 ----
+  S.busy = true;
+  var veilShown = false;
+  var veilTimer = setTimeout(function () {
+    // 等了 400ms 还没好才亮遮罩：很快的加载根本不需要提示，
+    // 一闪而过的遮罩比不显示更容易让人以为卡了
+    if (S.busy && !veilShown) { veil(true, opts.text || ('载入第 ' + (i + 1) + ' 段')); veilShown = true; }
+  }, 400);
   d.rolling = false;
   var ok = await prepare(d, i, 0);
   if (!ok) { await sleep(500); ok = await prepare(d, i, 0); }
+  clearTimeout(veilTimer);
   if (!ok) {
     veil(false);
     setStatus('err', '视频流加载失败');
@@ -479,7 +597,6 @@ async function jumpTo(i, opts) {
   updateToggle();
   el.placeholder.classList.add('hide');
   el.errLayer.hidden = true;
-  await sleep(120);
   veil(false);
   S.busy = false;
   updateUI(true);
@@ -491,6 +608,9 @@ async function jumpTo(i, opts) {
     try { cur.v.currentTime = rt; if (S.hasAudio) cur.a.currentTime = rt; } catch (e) {}
     updateHud(rt, seg.start + seg.dur);
   }
+  updateFsBar();
+  revealFsControls(true);
+  console.log('[cut] slow idx=' + i + ' veil=' + veilShown);
   prepareNext();
 }
 
@@ -498,6 +618,7 @@ function pauseAll() {
   S.playing = false;
   S.decks.forEach(function (d) { d.v.pause(); if (S.hasAudio) d.a.pause(); });
   updateToggle();
+  updateFsBar();
   savePos();
 }
 async function resumeAll() {
@@ -507,6 +628,7 @@ async function resumeAll() {
   await safePlay(cur.v);
   if (S.hasAudio && !cur.a.muted) await safePlay(cur.a);
   updateToggle();
+  updateFsBar();
 }
 function stopAll() {
   S.playing = false;
@@ -518,6 +640,55 @@ function stopAll() {
   });
   S.active = 0;
   updateToggle();
+}
+
+/**
+ * 把预热中的 deck 钉在正确的时间轴位置上。
+ *
+ * 预热 deck 从 (下一段.start - warmLead) 开始静音播放，如果不干预，它会一直往前走。
+ * 我们要的效果是：当前段播到 ct 时，预热 deck 恰好停在 ct 对应的位置。
+ * 因为两段是同一个视频文件里的不同时段，"对应位置" 就是「当前段已播时长 + 下一段起点」。
+ *
+ * 做法：不真的实时 seek（seek 本身会造成卡顿/闪帧），
+ * 而是用 playbackRate 微调 + 偏差超过阈值时才做一次硬 seek。
+ * 这样预热 deck 始终"待命"在切换点，一按即切，不会有任何加载动作。
+ */
+function followPreheated(ct, curEnd) {
+  if (S.pendingIdx < 0 || S.busy) return;
+  var d = otherDeck();
+  if (!d || !d.ready || !d.rolling || d.seg !== S.pendingIdx) return;
+  var nseg = S.segs[S.pendingIdx];
+  if (!nseg) return;
+
+  // 当前段的进度（0 ~ seg.dur）映射到下一段内部
+  var curSeg = S.segs[S.idx];
+  var intoCur = clamp(ct - curSeg.start, 0, curSeg.dur);
+  // 目标播放位置 = 下一段起点 + 与当前段相同的相对进度
+  // 但只在切换点附近才对齐；远离切换点时让它自由播（省 CPU）
+  var target = nseg.start + intoCur;
+  var diff = target - d.v.currentTime;
+
+  // 距离切换点还早：让它自由播，不干预（避免频繁 seek 卡顿）
+  var remain = curEnd - ct;
+  if (remain > 1.2) return;
+
+  if (Math.abs(diff) > 0.28) {
+    // 偏差过大：硬 seek 一次对齐（剩余时间已经很短，这一次 seek 用户基本感知不到）
+    try {
+      d.v.currentTime = target;
+      if (S.hasAudio) d.a.currentTime = target;
+    } catch (e) {}
+  } else if (Math.abs(diff) > 0.015) {
+    // 偏差很小：用播放速率微调，避免 seek 的卡顿感
+    var rate = S.rate * (1 + clamp(-diff * 0.5, -0.06, 0.06));
+    d.v.playbackRate = rate;
+    if (S.hasAudio) d.a.playbackRate = rate;
+  }
+  // 偏差已足够小：维持 S.rate 正常速率
+  if (Math.abs(diff) <= 0.015) {
+    d.v.playbackRate = S.rate;
+    if (S.hasAudio) d.a.playbackRate = S.rate;
+  }
 }
 
 function onSegmentEnd() {
@@ -535,6 +706,7 @@ function seekActiveTo(t) {
   var d = activeDeck();
   try { d.v.currentTime = rt; if (S.hasAudio) d.a.currentTime = rt; } catch (e) {}
   updateHud(rt, seg.start + seg.dur);
+  updateFsBar();
 }
 function doSeek(deltaSec) {
   if (S.idx < 0) return;
@@ -542,22 +714,42 @@ function doSeek(deltaSec) {
   seekActiveTo(d.v.currentTime + deltaSec);
 }
 
-/* 主循环：声画对时 + 段末切换 */
+/**
+ * 主循环：声画对时 + 预热跟随 + 段末切换
+ */
 function tick() {
   requestAnimationFrame(tick);
   if (S.hasAudio) syncAudio();
+
+  // 位置落盘放在「播放中」判断【之前】：
+  // 折叠切屏 / Activity 重建续播依赖这份数据，若只在播放中落盘，
+  // 用户暂停后切屏就丢位置（tick 会在下面直接 return）。
+  var now = performance.now();
+  if (S.idx >= 0 && now - S.lastPosSave > 2000) {
+    S.lastPosSave = now;
+    savePos();
+    updateFsBar();
+  }
+
   if (!S.playing || S.busy || S.idx < 0) return;
   var cur = activeDeck();
   var seg = S.segs[S.idx];
   if (!seg) return;
   var end = seg.start + seg.dur;
   var ct = cur.v.currentTime;
+
+  // 预热 deck 跟随：它已经静音起播，必须被钉在「当前段播放到它自己该出现的位置」上，
+  // 否则它会一路播到片段结尾，切换时就成了「跳到片尾」而不是「接着放」。
+  followPreheated(ct, end);
+
   if (ct >= end - 0.012) onSegmentEnd();
 
-  var now = performance.now();
-  if (now - S.lastHud > 100) { S.lastHud = now; updateHud(ct, end); updateRibbonCursor(ct); }
-  // 记忆播放：每 ~2s 落盘一次
-  if (now - S.lastPosSave > 2000) { S.lastPosSave = now; savePos(); }
+  if (now - S.lastHud > 100) {
+    S.lastHud = now;
+    updateHud(ct, end);
+    updateRibbonCursor(ct);
+    updateFsBar();
+  }
   // 周期性状态上报：便于在无法截图/点击的设备上通过 logcat 观测播放是否真的在推进、
   // 段末是否自动切换（这两项在真机上肉眼难验证，却最容易被机型差异破坏）
   if (now - (S.lastDiag || 0) > 5000) {
@@ -703,12 +895,27 @@ function reparse() {
 /* ---------------------- 记忆播放（续播） ---------------------- */
 function posKey() { return S.info && S.info.bvid ? ('bilihl_pos_' + S.info.bvid) : null; }
 function savePos() {
-  if (!S.playing || S.idx < 0 || !S.token) return;
+  // 暂停时也要落盘：Activity 被回收/折叠重建后正要靠这份数据续播，
+  // 若这里因为 !S.playing 直接返回，重建后就只能从头播。
+  if (S.idx < 0 || !S.token) return;
   var key = posKey();
   if (!key) return;
   var d = activeDeck();
   if (!d || !d.v || !isFinite(d.v.currentTime)) return;
-  safeSet(key, JSON.stringify({ idx: S.idx, t: d.v.currentTime }));
+  var t = d.v.currentTime;
+  safeSet(key, JSON.stringify({ idx: S.idx, t: t }));
+  reportPos(S.idx, t);
+}
+/** 把当前播放位置推给原生，供 Activity 被回收/重建后接续（native 的 onSaveInstanceState 会读这份缓存） */
+function reportPos(idx, t) {
+  try {
+    if (window.BiliBridge && BiliBridge.reportPos) BiliBridge.reportPos(idx, t);
+  } catch (e) {}
+}
+/** 供 native 在 onSaveInstanceState 里同步调用：立刻把位置刷进 localStorage + 上报原生 */
+function savePosNow() {
+  savePos();
+  try { if (window.BiliBridge && BiliBridge.diag) BiliBridge.diag('[savePosNow] idx=' + S.idx); } catch (e) {}
 }
 function checkResume() {
   el.resume.hidden = true;
@@ -754,8 +961,12 @@ function setUiMode(mode) {
     if (w) { w.style.transform = ''; w.style.webkitTransform = ''; }
     if (typeof revealFsControls === 'function') revealFsControls();
   } else {
-    document.body.classList.remove('fullscreen', 'fs-hide', 'fs-lock');
-    S.locked = false;
+    document.body.classList.remove('fullscreen', 'fs-hide', 'fs-lock', 'fs-keep');
+    S.locked = false; S.keepUi = false;
+    if (fsTimer) { clearTimeout(fsTimer); fsTimer = 0; }
+    if (el.fsLock) el.fsLock.textContent = '🔒';
+    if (el.fsKeep) el.fsKeep.textContent = '📍';
+    if (el.fsBarFill) el.fsBarFill.style.width = '0%';
     applyViewportScale();
   }
 }
@@ -764,13 +975,54 @@ function enterFullscreen() {
   else setUiMode('fullscreen');
 }
 var fsTimer = 0;
-function revealFsControls() {
+var FS_HIDE_MS = 3600;
+/**
+ * 全屏控制条显隐。
+ * 原实现只有一个 3.2s 定时器无条件加 .fs-hide，用户反馈「播放时进度条自己消失了」——
+ * 根因是：定时器在「刚进入全屏」「刚拖完进度条」「刚做完双击跳转」后都会继续计时，
+ * 于是控件在用户还在看的时候淡出，且淡出后连进度指示也一起没了，看起来像进度条坏了。
+ * 现在的规则：
+ *   1) 暂停时永不隐藏（用户需要按钮）；
+ *   2) 手势/拖动进行中永不隐藏；
+ *   3) 常显开关（S.keepUi）打开时永不隐藏；
+ *   4) 锁定态（S.locked）仍按旧逻辑隐藏叠加层，这是防误触的设计意图；
+ *   5) 无论控制条显隐，底部 #fsBar 这条细进度条始终可见并反映当前段进度。
+ */
+function revealFsControls(sticky) {
   if (S.uiMode !== 'fullscreen') return;
   document.body.classList.remove('fs-hide');
-  if (fsTimer) clearTimeout(fsTimer);
-  fsTimer = setTimeout(function () { document.body.classList.add('fs-hide'); }, 3200);
+  if (fsTimer) { clearTimeout(fsTimer); fsTimer = 0; }
+  if (sticky || fsShouldKeep()) return;
+  fsTimer = setTimeout(function () { fsTimer = 0; hideFsControls(); }, FS_HIDE_MS);
 }
-function hideFsControls() { document.body.classList.add('fs-hide'); }
+function fsShouldKeep() {
+  return !!(S.keepUi || !S.playing || S.gesturing || S.scrubbing || gs.mode);
+}
+/** 播放进度推进时刷新常驻细进度条（控制条隐藏时也能看到播到哪里） */
+function updateFsBar() {
+  if (!el.fsBarFill) return;
+  if (S.uiMode !== 'fullscreen' || S.idx < 0 || !S.segs[S.idx]) { el.fsBarFill.style.width = '0%'; return; }
+  var seg = S.segs[S.idx];
+  var d = activeDeck();
+  var t = d && d.v ? d.v.currentTime : 0;
+  var p = seg.dur > 0 ? clamp((t - seg.start) / seg.dur, 0, 1) : 0;
+  el.fsBarFill.style.width = (p * 100).toFixed(2) + '%';
+}
+function hideFsControls() {
+  if (S.uiMode !== 'fullscreen') return;
+  if (fsShouldKeep()) return;
+  document.body.classList.add('fs-hide');
+}
+function toggleKeepUi() {
+  S.keepUi = !S.keepUi;
+  if (el.fsKeep) {
+    el.fsKeep.textContent = S.keepUi ? '📌' : '📍';
+    el.fsKeep.title = S.keepUi ? '常显已开启：控制条不再自动隐藏' : '常显已关闭：控制条 3.6s 无操作自动隐藏';
+  }
+  document.body.classList.toggle('fs-keep', S.keepUi);
+  revealFsControls(true);
+  BiliBridgeToast(S.keepUi ? '控制条常显' : '控制条自动隐藏');
+}
 
 /* 中心播放/暂停图标闪现 */
 function flashCenter(playing) {
@@ -825,14 +1077,15 @@ function BiliBridgeToast(msg) {
 }
 
 function onGestureStart(e) {
-  if (S.locked && e.target.id !== 'fsLock') return;
+  if (S.locked && e.target.id !== 'fsLock' && e.target.id !== 'fsKeep') return;
   if (e.target.closest && e.target.closest('.fs-btn')) return; // 按钮自身处理
   var t = e.touches[0];
   gs.x0 = t.clientX; gs.y0 = t.clientY; gs.t0 = performance.now();
   gs.moved = false; gs.mode = null; gs.dx = 0; gs.dy = 0;
+  S.gesturing = true;
 }
 function onGestureMove(e) {
-  if (S.locked && e.target.id !== 'fsLock') return;
+  if (S.locked && e.target.id !== 'fsLock' && e.target.id !== 'fsKeep') return;
   if (e.target.closest && e.target.closest('.fs-btn')) return;
   var t = e.touches[0];
   var dx = t.clientX - gs.x0, dy = t.clientY - gs.y0;
@@ -842,6 +1095,8 @@ function onGestureMove(e) {
   if (gs.mode === null && (Math.abs(dx) > 10 || Math.abs(dy) > 10)) {
     if (Math.abs(dx) > Math.abs(dy)) gs.mode = 'seek';
     else gs.mode = (gs.x0 < window.innerWidth / 2) ? 'bright' : 'vol';
+    S.scrubbing = (gs.mode === 'seek');
+    revealFsControls(true); // 操作期间强制常显，抬手后再开始倒计时
   }
   if (gs.mode === 'seek') {
     e.preventDefault();
@@ -857,7 +1112,8 @@ function onGestureMove(e) {
   }
 }
 function onGestureEnd() {
-  if (S.locked) { if (gs.moved) gs.moved = false; return; }
+  S.gesturing = false; S.scrubbing = false;
+  if (S.locked) { if (gs.moved) gs.moved = false; gs.mode = null; return; }
   var dt = performance.now() - gs.t0;
   if (!gs.moved) {
     handleTap();
@@ -865,6 +1121,7 @@ function onGestureEnd() {
     if (gs.mode === 'seek') { doSeek(dxToTime(gs.dx)); hideSeekPreview(); }
   }
   gs.moved = false; gs.mode = null;
+  if (S.uiMode === 'fullscreen') revealFsControls();
 }
 function handleTap() {
   var now = performance.now();
@@ -892,8 +1149,14 @@ function bindGestures() {
   el.stage.addEventListener('touchstart', onGestureStart, { passive: true });
   el.stage.addEventListener('touchmove', onGestureMove, { passive: false });
   el.stage.addEventListener('touchend', onGestureEnd, { passive: true });
+  el.stage.addEventListener('touchcancel', onGestureEnd, { passive: true });
   // 全屏下任意触摸都唤起控制条
   document.addEventListener('touchstart', function () { if (S.uiMode === 'fullscreen') revealFsControls(); }, true);
+  // 鼠标（折叠屏外接键鼠 / 平板 / 桌面浏览器调试时）也要能唤起，
+  // 否则外接鼠标场景下控制条一旦淡出就只能靠触摸回来
+  document.addEventListener('mousemove', function () {
+    if (S.uiMode === 'fullscreen') revealFsControls();
+  }, true);
 }
 
 /* ---------------------- 事件 ---------------------- */
@@ -911,8 +1174,9 @@ el.fsLock.onclick = function () {
   document.body.classList.toggle('fs-lock', S.locked);
   el.fsLock.textContent = S.locked ? '🔓' : '🔒';
   BiliBridgeToast(S.locked ? '已锁定，防误触' : '已解锁');
-  revealFsControls();
+  revealFsControls(true);
 };
+el.fsKeep.onclick = function () { this.blur(); toggleKeepUi(); };
 el.btnDemo.onclick = function () { el.text.value = DEMO; console.log('[demo] fill', DEMO.split('\n').length, 'lines'); reparse(); };
 el.btnClear.onclick = function () { el.text.value = ''; reparse(); };
 el.btnFetchReplies.onclick = function () {
@@ -946,6 +1210,13 @@ el.vol.oninput = function () {
 el.padFront.onchange = function () { S.padFront = +el.padFront.value || 0; reparse(); };
 el.padBack.onchange = function () { S.padBack = +el.padBack.value || 0; reparse(); };
 el.text.addEventListener('input', reparse);
+
+// 分享兜底
+el.sfGo.onclick = submitFallback;
+el.sfClose.onclick = function () { el.shareFallback.hidden = true; };
+el.sfInput.addEventListener('keydown', function (e) {
+  if (e.key === 'Enter' || e.keyCode === 13) { e.preventDefault(); submitFallback(); }
+});
 
 document.addEventListener('keydown', function (e) {
   if (e.target.tagName === 'TEXTAREA' || e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
@@ -1025,16 +1296,28 @@ function loadFromNative() {
   var bv = q.get('bv');
   var demo = q.get('demo') === '1';
   var title = q.get('title');
+  // 折叠屏切屏 / Activity 重建后由原生带上来的续播坐标：ridx=段序号，rt=段内秒数
+  var ridx = parseInt(q.get('ridx') || '-1', 10);
+  var rt = parseFloat(q.get('rt') || '-1');
+  var resume = (ridx >= 0 && isFinite(rt) && rt >= 0);
   if (title) S.sharedTitle = title;
-  console.log('[init] bv=' + bv + ' demo=' + demo + ' title=' + title + ' cssW=' + window.innerWidth + ' dpr=' + window.devicePixelRatio);
+  console.log('[init] bv=' + bv + ' demo=' + demo + ' title=' + title
+      + ' resume=' + resume + ' ridx=' + ridx + ' rt=' + rt
+      + ' cssW=' + window.innerWidth + ' dpr=' + window.devicePixelRatio);
   if (bv) {
     console.log('[init] calling resolveVideo(' + bv + ')');
     resolveVideo(bv).then(function (ok) {
-      console.log('[init] resolve returned ok=' + ok + ' demo=' + demo);
-      reportDiag('resolve-done ok=' + ok);
-      if (!demo) return;
-      el.btnDemo.click();
-      waitAndPlay(0);
+      console.log('[init] resolve returned ok=' + ok + ' demo=' + demo + ' resume=' + resume);
+      reportDiag('resolve-done ok=' + ok + ' resume=' + resume);
+      if (!ok) return;
+      if (demo) el.btnDemo.click();
+      if (resume) {
+        // 折叠切屏续播：直接跳到原段落与段内位置，不弹续播提示条（用户要的是「接上」）
+        if (ridx < S.segs.length) jumpTo(ridx, { seekOffset: rt, text: '续播 第 ' + (ridx + 1) + ' 段' });
+        else waitAndPlay(0);
+      } else if (demo) {
+        waitAndPlay(0);
+      }
     }).catch(function (e) {
       console.error('[init] resolve threw: ' + (e && (e.message || e)));
     });
@@ -1088,6 +1371,16 @@ document.body.style.minHeight = '';
 return;
 }
   var scale = cssW / natural;
+  // 外屏（折叠屏 cover display）可用宽度很窄，缩到 0.3x 会让文字糊到无法辨认。
+  // 这里设下限：宁可让页面横向滚动/内容被裁，也不能小到看不清。
+  // 外屏实测可用 CSS 宽度约 340~400，下限 0.75 对应 ~315px 已接近可读极限。
+  if (scale < 0.75) {
+    console.log('[vp-fix] cssW ' + cssW + ' 低于可读下限，改用下限缩放 0.75（内容会超宽）');
+    scale = 0.75;
+    document.body.classList.add('vp-narrow');
+  } else {
+    document.body.classList.remove('vp-narrow');
+  }
   w.style.transformOrigin = '0 0';
   w.style.webkitTransformOrigin = '0 0';
   w.style.transform = 'scale(' + scale.toFixed(3) + ')';
@@ -1119,10 +1412,41 @@ return;
     setNet('err', '本地服务未响应'); setStatus('err', '本地服务未响应');
   });
   applyViewportScale();
-  window.addEventListener('resize', applyViewportScale);
   requestAnimationFrame(function () { setTimeout(applyViewportScale, 60); });
 // 布局就绪后再报一次诊断：便于在无法截图的设备上确认 stage 尺寸是否正常
 // （曾出现过给 #appWrap 设宽导致 padding-top:56.25% 失效、视频区塌成 38x21 的问题）
 setTimeout(function () { applyViewportScale(); reportDiag('layout-ready'); }, 400);
+  // 折叠屏切屏 / 转屏：视口尺寸变化后必须重新量布局。
+  // 用 innerWidth/innerHeight 去重，避免旋转时连续触发几十次 resize 造成重复重排。
+  var lastVp = window.innerWidth + 'x' + window.innerHeight;
+  window.addEventListener('resize', function () {
+    var vp = window.innerWidth + 'x' + window.innerHeight;
+    if (vp === lastVp) return;
+    var wasLandscape = lastVp.split('x')[0] > lastVp.split('x')[1];
+    var isLandscape = window.innerWidth > window.innerHeight;
+    lastVp = vp;
+    applyViewportScale();
+    requestAnimationFrame(function () {
+      applyViewportScale();
+      reportDiag('viewport-' + vp + (isLandscape !== wasLandscape ? ' orient-changed' : ''));
+      try { if (window.BiliBridge && BiliBridge.reportScreen) BiliBridge.reportScreen('viewport=' + vp); } catch (e) {}
+    });
+  });
+  // 折叠屏切屏时 WebView 有时不会派发 resize，用 orientationchange + 轮询兜底
+  window.addEventListener('orientationchange', function () {
+    setTimeout(function () { applyViewportScale(); reportDiag('orientationchange'); }, 120);
+  });
+  var vpPoll = setInterval(function () {
+    var vp = window.innerWidth + 'x' + window.innerHeight;
+    if (vp === lastVp) return;
+    lastVp = vp;
+    applyViewportScale();
+    reportDiag('vp-poll-' + vp);
+  }, 400);
+  // 页面隐藏（切屏/切后台）前立刻落盘，保证原生能拿到最新位置
+  document.addEventListener('visibilitychange', function () {
+    if (document.hidden) savePosNow();
+  });
+  window.addEventListener('pagehide', function () { savePosNow(); });
   loadFromNative();
 })();

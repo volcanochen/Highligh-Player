@@ -25,9 +25,17 @@ import java.util.concurrent.Executors;
 /**
  * 本机 HTTP 服务：托管前端静态文件 + 提供 /api/resolve 与 /api/media 代理。
  * 与桌面 server.py 一一对应，WebView 直接加载 http://127.0.0.1:PORT/ 即可（同源，前端代码零改动）。
+ *
+ * 【为什么是进程级单例】折叠屏从内屏切到外屏（或反向）时，如果 configChanges 没覆盖住
+ * smallestScreenSize/screenLayout/density，Activity 会被销毁重建，WebView 随之销毁，
+ * 原来的 BiliApi 解析缓存（MEDIA token 表）全部丢失、端口也可能变化，
+ * 于是「session 断了、进度接不上」。把服务与端口固定在进程上，
+ * Activity 重建后仍复用同一个端口 → localStorage / 服务端 token 都保持，续播才有意义。
  */
 public class ProxyServer extends Thread {
     private static final String TAG = "BiliHl";
+    private static volatile ProxyServer INSTANCE = null;
+
     private final Context ctx;
     private ServerSocket ss;
     private int port = -1;
@@ -35,9 +43,26 @@ public class ProxyServer extends Thread {
 
     public ProxyServer(Context ctx) { this.ctx = ctx.getApplicationContext(); }
 
+    /** 进程级单例：首个调用者启动，之后复用（端口不变） */
+    public static synchronized ProxyServer get(Context ctx) {
+        if (INSTANCE == null) {
+            ProxyServer s = new ProxyServer(ctx);
+            s.start();
+            int tries = 0;
+            while (s.baseUrl == null && tries++ < 100) {
+                try { Thread.sleep(50); } catch (InterruptedException ignore) {}
+            }
+            INSTANCE = s;
+            Log.i(TAG, "ProxyServer 单例已就绪: " + s.baseUrl);
+        }
+        return INSTANCE;
+    }
+
     @Override
     public void run() {
-        for (int p = 8777; p <= 8782; p++) {
+        // 优先固定端口：端口变化等于换了 origin，WebView 的 localStorage（续播记忆）就取不到了
+        int[] preferred = {8777, 8778, 8779, 8780, 8781, 8782};
+        for (int p : preferred) {
             try {
                 ss = new ServerSocket(p, 50, InetAddress.getByName("127.0.0.1"));
                 port = p;
@@ -58,9 +83,11 @@ public class ProxyServer extends Thread {
         }
     }
 
+    /** 进程退出时才真正关闭；Activity 重建不调用本方法，否则端口会释放导致 localStorage 失联 */
     public void shutdown() {
         try { ss.close(); } catch (Exception ignore) {}
         interrupt();
+        INSTANCE = null;
     }
 
     private void handle(Socket s) {

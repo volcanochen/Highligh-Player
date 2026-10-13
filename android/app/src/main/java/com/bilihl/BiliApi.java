@@ -402,7 +402,13 @@ return out;
         }
     }
 
-    /** 从链接/裸 ID 解析出 [bvid, pageStr] */
+    /** 从链接/裸 ID 解析出 [bvid, pageStr]
+     *
+     * 【为什么要在这里也解短链】用户手动粘贴到兜底框的常常是 b23.tv 短链
+     * （分享面板复制出来的就是短链）。原来只有 MainActivity.handleIntent 会解短链，
+     * 走 /api/resolve 这条路直接进 parseTarget，短链会被判成"没识别出 BV 号"。
+     * 命中短链时在服务端展开，这样任何入口（分享/粘贴/deep link）行为一致。
+     */
     static String[] parseTarget(String raw) {
         raw = (raw == null) ? "" : raw.trim();
         int page = 1;
@@ -412,7 +418,62 @@ return out;
         if (m.find()) return new String[]{m.group(1), String.valueOf(page)};
         m = java.util.regex.Pattern.compile("av(\\d+)", java.util.regex.Pattern.CASE_INSENSITIVE).matcher(raw);
         if (m.find()) return new String[]{"av" + m.group(1), String.valueOf(page)};
-        throw new RuntimeException("没识别出 BV 号，请粘贴完整视频链接或 BV 号");
+
+        // 走到这里说明没有 BV/av，可能是 b23.tv（或其它跳转型）短链
+        String expanded = expandShortLink(raw);
+        if (expanded != null && !expanded.equals(raw)) {
+            java.util.regex.Matcher m2 = java.util.regex.Pattern.compile("[?&]p=(\\d+)").matcher(expanded);
+            int p2 = page;
+            if (m2.find()) p2 = Math.max(1, Integer.parseInt(m2.group(1)));
+            java.util.regex.Matcher m3 = java.util.regex.Pattern.compile("(BV[0-9A-Za-z]{10})").matcher(expanded);
+            if (m3.find()) return new String[]{m3.group(1), String.valueOf(p2)};
+            java.util.regex.Matcher m4 = java.util.regex.Pattern.compile("av(\\d+)", java.util.regex.Pattern.CASE_INSENSITIVE).matcher(expanded);
+            if (m4.find()) return new String[]{"av" + m4.group(1), String.valueOf(p2)};
+        }
+        throw new RuntimeException("没识别出 BV 号，请粘贴完整视频链接或 BV 号（短链会自动展开）");
+    }
+
+    /** 展开短链：跟随 302 拿最终 URL；若返回 200 页面则扫 body 里的真实链接 */
+    private static String expandShortLink(String url) {
+        if (url == null) return null;
+        String u = url.trim();
+        if (!u.startsWith("http")) u = "https://" + u;
+        HttpURLConnection c = null;
+        try {
+            c = (HttpURLConnection) new URL(u).openConnection();
+            c.setInstanceFollowRedirects(true);
+            c.setConnectTimeout(12000);
+            c.setReadTimeout(12000);
+            c.setRequestMethod("GET");
+            c.setRequestProperty("User-Agent",
+                    "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/125.0.0.0 Mobile");
+            c.connect();
+            String loc = c.getURL().toString();
+            if (loc != null && (loc.contains("BV") || loc.contains("/av"))) {
+                Log.i(TAG, "短链展开: " + loc);
+                return loc;
+            }
+            // 没跳走就读 body
+            InputStream is = c.getInputStream();
+            StringBuilder sb = new StringBuilder();
+            byte[] buf = new byte[8192];
+            int n;
+            int total = 0;
+            while ((n = is.read(buf)) > 0 && total < 512 * 1024) {
+                sb.append(new String(buf, 0, n, "UTF-8"));
+                total += n;
+            }
+            is.close();
+            String body = sb.toString();
+            java.util.regex.Matcher mb =
+                    java.util.regex.Pattern.compile("(BV[0-9A-Za-z]{10})").matcher(body);
+            if (mb.find()) return mb.group(1);
+        } catch (Exception e) {
+            Log.w(TAG, "短链展开失败: " + e.getMessage());
+        } finally {
+            if (c != null) try { c.disconnect(); } catch (Exception ignore) {}
+        }
+        return null;
     }
 
     static JSONObject pickStream(JSONArray streams, int wantQn) throws JSONException {
