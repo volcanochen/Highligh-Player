@@ -436,6 +436,8 @@ async function prepare(d, i, lead) {
   await waitBuffered(d.v, Math.min(2.4, Math.max(1.0, seg.dur * 0.5)), 15000);
   if (S.hasAudio) await waitBuffered(d.a, 0.8, 12000);
   d.ready = true;
+  d.everReady = true;   // 记住「这个 deck 至少成功准备过一次」，
+                         // 老 WebView 上 readyState 会偶发回落，不能只信瞬时值
   return true;
 }
 
@@ -546,7 +548,11 @@ async function jumpTo(i, opts) {
 
   // ---- 快速路径：已预热，直接硬切 ----
   var d = otherDeck();
-  if (d.seg === i && d.ready && d.v.readyState >= 3) {
+  // readyState 门槛从 3 放宽到「>=2 或 已预热完成」：
+  // 老 WebView 上预热 deck 的 readyState 会偶发掉回 1（缓冲被重置），
+  // 严格要求 >=3 会让每次段末切换都退回慢路径、闪一次加载遮罩。
+  // 这里只要 deck 确实 ready过，就走硬切 —— 画面已经在那层就位了。
+  if (d.seg === i && d.ready && (d.v.readyState >= 2 || d.everReady)) {
     S.busy = true;
     S.idx = i;
     S.pendingIdx = -1;
@@ -653,6 +659,17 @@ function stopAll() {
  * 而是用 playbackRate 微调 + 偏差超过阈值时才做一次硬 seek。
  * 这样预热 deck 始终"待命"在切换点，一按即切，不会有任何加载动作。
  */
+/** 当前播放位置之后已缓冲的秒数（没有缓冲信息时返回 0） */
+function bufferedAhead(media) {
+  try {
+    var b = media.buffered, ct = media.currentTime, best = 0;
+    for (var i = 0; i < b.length; i++) {
+      if (b.start(i) <= ct + 0.2 && b.end(i) - ct > best) best = b.end(i) - ct;
+    }
+    return best;
+  } catch (e) { return 0; }
+}
+
 function followPreheated(ct, curEnd) {
   if (S.pendingIdx < 0 || S.busy) return;
   var d = otherDeck();
@@ -674,10 +691,19 @@ function followPreheated(ct, curEnd) {
 
   if (Math.abs(diff) > 0.28) {
     // 偏差过大：硬 seek 一次对齐（剩余时间已经很短，这一次 seek 用户基本感知不到）
-    try {
-      d.v.currentTime = target;
-      if (S.hasAudio) d.a.currentTime = target;
-    } catch (e) {}
+    //
+    // 【为什么先查缓冲】老 WebView（实测 Chrome 74 / Note8 Android 9）上，
+    // 对一个已经 readyState=4、正在滚动的 video 做 currentTime 硬 seek，
+    // 会把缓冲清掉、readyState 掉回 1，等于把这个「已经预热好」的 deck 打回原形——
+    // 结果段末切换时 fastCut 判定失败，退回慢路径，每切一段都闪一次加载圈圈。
+    // 而N6（WebView 138）上同样 seek 却毫无影响，属老内核特性差异。
+    // 缓冲本来就够（覆盖到切换点之后）时完全不需要 seek，直接跳过。
+    if (bufferedAhead(d.v) < remain + 0.6) {
+      try {
+        d.v.currentTime = target;
+        if (S.hasAudio) d.a.currentTime = target;
+      } catch (e) {}
+    }
   } else if (Math.abs(diff) > 0.015) {
     // 偏差很小：用播放速率微调，避免 seek 的卡顿感
     var rate = S.rate * (1 + clamp(-diff * 0.5, -0.06, 0.06));

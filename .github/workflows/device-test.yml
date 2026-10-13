@@ -1,0 +1,84 @@
+name: 真机测试门禁
+
+# 这个工作流在**自托管 runner** 上跑——因为它需要连接两台真实的 Android 设备
+# （一台Android 9 旧 WebView，一台 Android 16 折叠屏）。
+# GitHub 官方的 runner 没有实体设备，无法执行真机用例。
+#
+# 一次性配置（在有设备的机器上）：
+#   1. 该机器加入仓库的 Actions self-hosted runners（标签：self-hosted, android）
+#   2. 两台设备 adb 连接正常：adb devices 能看到且状态为 device
+#   3. Android SDK / JDK（jbr）就位
+#   4. 本仓库克隆到该机器
+#
+#门禁规则：任何 push / PR 都必须全绿才允许合入。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  device-test:
+    # 自托管 runner：需要标签 self-hosted + android
+    runs-on: [self-hosted, android]
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 确认两台设备在线
+        shell: bash
+        run: |
+          adb devices
+          n=$(adb devices | grep -c "	device$")
+          echo "在线设备数：$n"
+          if [ "$n" -lt 2 ]; then
+            echo "::error::需要至少 2 台设备在线才能跑双机测试，当前只有 $n 台"
+            exit 1
+          fi
+
+      - name: 构建 APK
+        run: bash android/build_apk.sh
+
+      - name: JVM 单元测试
+        shell: bash
+        run: |
+          export MSYS2_ARG_CONV_EXCL="*"
+          SDK="C:/Users/volcano/AppData/Local/Android/Sdk"
+          JBR="C:/Program Files/Android/Android Studio/jbr"
+          if [ ! -x "$JBR/bin/javac.exe" ]; then
+            JBR="${JAVA_HOME:-/usr/lib/jvm/default-java}"
+          fi
+          mkdir -p _test/out
+          "$JBR/bin/javac.exe" -encoding UTF-8 -nowarn \
+            -cp "$SDK/platforms/android-34/android.jar;android/build/classes" \
+            -d _test/out _test/com/bilihl/BiliIntentTest.java
+          "$JBR/bin/java.exe" \
+            -cp "$SDK/platforms/android-34/android.jar;android/build/classes;_test/out" \
+            com.bilihl.BiliIntentTest
+
+      - name: 双机真机测试
+        run: python _test/run_suite.py
+
+      - name: 上传测试报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-report
+          path: docs/test-reports/
+
+      - name: 测试报告摘要
+        if: always()
+        run: |
+          echo "### 真机测试结论" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          cat docs/test-reports/latest.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 门禁判定
+        run: |
+          if grep -q "❌ 存在失败项" docs/test-reports/latest.md; then
+            echo "::error::真机测试存在失败项，禁止合入"
+            exit 1
+          fi
+          echo "真机测试全部通过"

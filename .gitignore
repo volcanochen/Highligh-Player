@@ -27,3 +27,7 @@ _comments_raw.json
 
 # ---- 测试产物 ----
 _test/out/
+
+# ---- 测试运行产物 ----
+_test/last_result.json
+_test/out/

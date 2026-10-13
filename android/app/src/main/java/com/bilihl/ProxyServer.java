@@ -90,6 +90,34 @@ public class ProxyServer extends Thread {
         INSTANCE = null;
     }
 
+    /**
+     * 解析带整体重试。
+     *
+     * 为什么需要：蜂窝网/弱网下 B 站接口会瞬时无响应。BiliApi 内部已对单个请求
+     * 做过指数退避重试，但 playurl / 评论那一批仍可能整体失败。
+     * 这里再包一层「只对超时/IO 类失败重试」，最多再试 3 次：
+     *  - 「视频不存在」「没识别出 BV」这类确定性错误直接抛出，不浪费时间；
+     *  - 超时/连接异常才重试，因为重试确实能救回来（实测同一秒重试即成功）。
+     */
+    private static JSONObject resolveWithRetry(String raw, int page, int qn, String cookie)
+            throws Exception {
+        Exception last = null;
+        for (int attempt = 0; attempt < 3; attempt++) {
+            try {
+                return BiliApi.resolve(raw, page, qn, cookie);
+            } catch (Exception e) {
+                String msg = e.getMessage() == null ? "" : e.getMessage();
+                boolean retriable = msg.contains("超时") || msg.contains("网络")
+                        || e instanceof java.io.IOException;
+                Log.w(TAG, "resolve attempt " + (attempt + 1) + " failed: " + msg);
+                if (!retriable) throw e;
+                last = e;
+                try { Thread.sleep(600L * (attempt + 1)); } catch (InterruptedException ignore) {}
+            }
+        }
+        throw last == null ? new RuntimeException("解析失败") : last;
+    }
+
     private void handle(Socket s) {
         try {
             s.setSoTimeout(35000);
@@ -147,7 +175,7 @@ public class ProxyServer extends Thread {
             String cookie = q.getOrDefault("cookie", "");
             try {
                 if (raw.trim().isEmpty()) throw new RuntimeException("请填写视频链接或 BV 号");
-                JSONObject j = BiliApi.resolve(raw, page, qn, cookie);
+                JSONObject j = resolveWithRetry(raw, page, qn, cookie);
                 sendJson(os, 200, j.toString());
             } catch (Exception e) {
                 sendJson(os, 200, "{\"ok\":false,\"error\":\"" + jsonEscape(e.getMessage()) + "\"}");

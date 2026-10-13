@@ -35,6 +35,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 /**
  * B 站取流核心：view -> nav(wbi) -> playurl，与桌面 server.py 逻辑一致，纯标准库实现。
@@ -325,8 +326,11 @@ return out;
         try {
             forceV4(c);
             c.setRequestMethod("GET");
-            c.setConnectTimeout(10000);
-            c.setReadTimeout(20000);
+            // 弱网（尤其蜂窝网）下握手慢，实测单次 view 请求可到 2.8s；
+            // 10s 连接超时在基站切换/DNS 重解析时容易被打穿，
+            // 放宽到 15s/25s，配合上层的指数退避重试，显著降低误报超时。
+            c.setConnectTimeout(15000);
+            c.setReadTimeout(25000);
             if (headers != null) for (Map.Entry<String, String> e : headers.entrySet())
                 c.setRequestProperty(e.getKey(), e.getValue());
             int code = c.getResponseCode();
@@ -594,10 +598,18 @@ return host != null && (host.contains("estgoss") || host.contains("mirroralib"))
                 try {
                     return httpGetString(viewUrl, h);
                 } catch (Exception e1) {
-                    // 弱网/基站切换偶发握手失败，重试一次，避免直接抛"解析失败"
-                    Log.w(TAG, "view fetch failed (" + e1 + "), retry once");
-                    try { Thread.sleep(300); } catch (Exception ignore) {}
-                    return httpGetString(viewUrl, h);
+                    // 弱网/基站切换时握手失败很常见（实测蜂窝网下单次 view 可能要 2.8s，
+                    // 抖动时首连直接失败）。只重试一次不够，改为指数退避重试 3 次。
+                    Exception last = e1;
+                    for (int attempt = 1; attempt <= 3; attempt++) {
+                        try { Thread.sleep(300L * attempt); } catch (Exception ignore) {}
+                        try { return httpGetString(viewUrl, h); }
+                        catch (Exception e2) {
+                            last = e2;
+                            Log.w(TAG, "view fetch retry " + attempt + " failed: " + e2);
+                        }
+                    }
+                    throw last;
                 } finally { ms[0] = System.currentTimeMillis() - s; }
             }
         });
@@ -629,10 +641,16 @@ finally { ms[2] = System.currentTimeMillis() - s; }
 String viewBody;
 String spiBody = "";
 String navBody = "";
-try { viewBody = fView.get(18, TimeUnit.SECONDS); }
+try { viewBody = fView.get(30, TimeUnit.SECONDS); }
 catch (Exception e) {
-throw new RuntimeException("取视频信息失败（网络超时），请检查网络后重试");
-}
+            // 明确区分「超时」与「其它失败」，否则用户在弱网下只看到一句
+            // 「网络超时」，无法判断是网络真不通、还是被 18s 阈值砍掉了。
+            // 这里的 30s 覆盖了 view 请求内部的重试（共 3 次尝试）+ 退避等待。
+            Log.w(TAG, "view fetch failed: " + e);
+            throw new RuntimeException(e instanceof TimeoutException
+                    ? "取视频信息超时（网络太慢或 B 站接口无响应），请稍后重试或切到 WiFi"
+                    : "取视频信息失败：" + (e.getMessage() == null ? e.toString() : e.getMessage()));
+        }
         try { spiBody = fSpi.get(15, TimeUnit.SECONDS); } catch (Exception ignore) {}
         try { navBody = fNav.get(15, TimeUnit.SECONDS); } catch (Exception ignore) {}
 
