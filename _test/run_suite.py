@@ -121,7 +121,17 @@ def run_device(dev, only_feature=None, install=True):
             print("  %s %-4s %-28s %5.1fs  %s" % (
                 mark, feat, c.name[:28], c.seconds, c.detail[:60]))
     finally:
-        dev.cleanup()
+        # 收尾：不能把设备留在测试界面上（全屏/兜底弹窗/后台进程）。
+        # teardown 会复位页面 → 回桌面 → 强杀进程 → 恢复旋转 → 清日志与端口。
+        try:
+            dev.teardown()
+            print("  [收尾] 已退出测试界面、停掉应用并回桌面")
+        except Exception as e:
+            print("  [收尾] 清理时出现异常（不影响结果判定）：%s" % e)
+            try:
+                dev.cleanup()
+            except Exception:
+                pass
     return results
 
 

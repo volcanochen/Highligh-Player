@@ -75,6 +75,13 @@ public class MainActivity extends Activity {
         } catch (Exception e) { Log.w("BiliHl", "attachBaseContext density fix: " + e); }
     }
 
+    // 【网络选择交给系统】曾经在这里强制 java.net.preferIPv4Stack=true，
+    // 想绕开「IPv6 路由是死的」导致首包超时的机型。后来确认两点：
+    //   1) 这种进程级 hack 只对某些 ROM 有效，且会掩盖真实的双栈环境问题；
+    //   2) 系统（ConnectivityManager / netd）本身就会按网络能力选路，
+    //      WiFi 与蜂窝谁优该由系统判断，应用不该自己拍板。
+    // 所以这里不再干预，恢复系统默认行为。
+
     private WebView wv;
     private Button btnBack, btnTest, btnFull;
     private LinearLayout topbar;
@@ -164,6 +171,9 @@ public class MainActivity extends Activity {
 
         server = ProxyServer.get(this);
         baseUrl = server.baseUrl;
+        // 预热 B 站接口连接：省掉冷启动后第一次解析的 DNS+TCP+TLS 握手时间
+        // （蜂窝网下这一步能让首次解析从 30~40s 降到秒级）。失败无害。
+        BiliApi.warmUp();
 
         btnBack.setOnClickListener(v -> finish());
         btnTest.setOnClickListener(v -> loadPlayerWith("BV1GJ411x7h7", "demo=1"));

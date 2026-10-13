@@ -88,6 +88,10 @@ public String[] getDefaultCipherSuites() { return base.getDefaultCipherSuites();
 public String[] getSupportedCipherSuites() { return base.getSupportedCipherSuites(); }
 public Socket createSocket() throws IOException { return base.createSocket(); }
 public Socket createSocket(Socket s, String host, int port, boolean autoClose) throws IOException {
+// 诊断：HttpsURLConnection 实际走的是这个「已建好 TCP、只做 TLS 包装」的重载，
+// 而不是下面那个 createSocket(String,int)。也就是说 TCP/DNS 阶段根本没经过我们，
+// 「强制 IPv4」是否真的生效必须靠这行日志确认。
+Log.i(TAG, "forceV4 wrap host=" + host + ":" + port + " peer=" + (s == null ? "null" : s.getInetAddress()));
 return base.createSocket(s, host, port, autoClose);
 }
 public Socket createSocket(String host, int port) throws IOException {
@@ -111,8 +115,18 @@ return createSocket(host.getHostAddress(), port);
 }
 };
 
+    /**
+     * 【已停用】原「强制 IPv4」入口。
+     *
+     * 停用原因（实测确认）：HttpsURLConnection 只在 **TCP 建好之后** 才回调
+     * SSLSocketFactory 做 TLS 包装，而「选哪个地址建连」在那之前就由系统决定了。
+     * 日志为证：forceV4 wrap ... peer=api.bilibili.com/240e:97d:... —— 连的是 IPv6，
+     * 也就是说这个方法从来没起到它名字所声称的作用，只是多包了一层 TLS。
+     *
+     * 地址/网络的选择交给系统（WiFi 与蜂窝谁优由系统判断），应用不再干预。
+     */
     static void forceV4(HttpURLConnection c) {
-        if (c instanceof HttpsURLConnection) ((HttpsURLConnection) c).setSSLSocketFactory(FORCE_V4_SF);
+        // no-op: 见上方说明。保留方法是为了让 httpGetString 的调用点不被误删后无处回溯。
     }
 
     static final int[] MIXIN_TAB = {
@@ -308,6 +322,43 @@ return out;
         h.put("Accept-Language", "zh-CN,zh;q=0.9");
         if (cookie != null && !cookie.isEmpty()) h.put("Cookie", cookie);
         return h;
+    }
+
+    /**
+     * 冷启动连接预热（在 MainActivity.onCreate 里后台调用一次）。
+     *
+     * 【为什么需要】进程刚起来时，第一次访问 api.bilibili.com 要现做
+     * DNS 解析 + TCP 握手 + TLS 握手。蜂窝网下这一步实测能吃掉十几秒，
+     * 而用户从分享进来到真正发起解析通常只有 1~3s，正好撞在这段冷连接上
+     * —— 表现为「冷启动第一次解析要 30~40s，之后每次都秒开」。
+     * 这里提前在后台把这条路走一遍：HttpURLConnection 有 keep-alive 连接池，
+     * 预热完成后真实请求直接复用连接，省掉的就是那段握手时间。
+     *
+     * 预热失败（无网 / 被拦）完全无害，只是退化成原来的行为。
+     */
+    public static void warmUp() {
+        POOL.submit(new Runnable() {
+            public void run() {
+                long s = System.currentTimeMillis();
+                try {
+                    // 把 DNS 单独计时：冷启动首次解析慢，必须先分清是
+                    // 「DNS 解析慢」还是「TCP/TLS 慢」，两者的修法完全不同。
+                    long d0 = System.currentTimeMillis();
+                    InetAddress[] all = InetAddress.getAllByName("api.bilibili.com");
+                    int v4 = 0;
+                    for (InetAddress a : all) if (a instanceof Inet4Address) v4++;
+                    Log.i(TAG, "warmup dns " + (System.currentTimeMillis() - d0)
+                            + "ms n=" + all.length + " v4=" + v4);
+                    // nav 是最轻的公开接口（约 1KB），足够完成 TCP+TLS 全流程
+                    long d1 = System.currentTimeMillis();
+                    httpGetString("https://api.bilibili.com/x/web-interface/nav", apiHeaders(null));
+                    Log.i(TAG, "warmup http " + (System.currentTimeMillis() - d1) + "ms");
+                    Log.i(TAG, "warmup ok " + (System.currentTimeMillis() - s) + "ms");
+                } catch (Exception e) {
+                    Log.w(TAG, "warmup failed " + (System.currentTimeMillis() - s) + "ms: " + e);
+                }
+            }
+        });
     }
 
     /**

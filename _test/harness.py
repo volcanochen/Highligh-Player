@@ -536,6 +536,63 @@ class Device(object):
     def rotate_restore(self):
         self.sh("settings", "put", "system", "accelerometer_rotation", "1")
 
+    def teardown(self):
+        """测试收尾：把设备恢复到「干净、没有测试残留界面」的状态。
+
+        之前跑完套件，手机就停在播放器/全屏/兜底弹窗上，两个后果：
+          1) 手动拿起手机看到的是测试残留界面，不像一个刚装好的应用；
+          2) 下一轮冷启动用例拿到的其实是「后台还活着的应用」，测不到真正的冷启动。
+        所以这里必须：页面自复位 → 回桌面 → 强杀进程 → 恢复旋转 → 清日志与端口转发。
+        """
+        # 1) 让页面自己先复位（退出全屏 / 停播放 / 关掉浮层），
+        #    避免 force-stop 时还在解码、也避免把「全屏」「弹窗」状态带进下一轮
+        try:
+            self.cdp.js(
+                "(function(){try{"
+                " if(typeof setUiMode==='function') setUiMode('normal');"
+                " if(typeof stopAll==='function') stopAll();"
+                " var a=document.getElementById('shareFallback'); if(a) a.hidden=true;"
+                " var b=document.getElementById('settings'); if(b) b.hidden=true;"
+                " var c=document.getElementById('errLayer'); if(c) c.hidden=true;"
+                " if(typeof toggleSide==='function') toggleSide(false);"
+                " return 'ok';}catch(e){return 'ERR '+e;}})()",
+                timeout=8)
+        except Exception:
+            pass   # 页面已经关掉/设备掉线时无所谓，下面还有 force-stop 兜底
+
+        # 2) 回桌面：清掉残留界面，也让下一轮是真冷启动
+        try:
+            self.sh("input", "keyevent", "KEYCODE_HOME", timeout=15)
+        except Exception:
+            pass
+        time.sleep(0.4)
+
+        # 3) 彻底停掉应用进程
+        try:
+            self.force_stop()
+        except Exception:
+            pass
+
+        # 4) 恢复屏幕旋转（用例里为验证旋转保持而改过 user_rotation）
+        try:
+            self.rotate_restore()
+        except Exception:
+            pass
+
+        # 5) 清日志与端口转发
+        try:
+            self.log.stop()
+        except Exception:
+            pass
+        try:
+            self.log.clear()
+        except Exception:
+            pass
+        try:
+            self.host("forward", "--remove", "tcp:%d" % self.port)
+        except Exception:
+            pass
+
     def cleanup(self):
         self.log.stop()
         try:

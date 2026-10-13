@@ -13,9 +13,13 @@ var el = {
   stage: $('#stage'), placeholder: $('#placeholder'),
   veil: $('#veil'), veilText: $('#veilText'),
   errLayer: $('#errLayer'), errText: $('#errText'), errRetry: $('#errRetry'),
-  ribbon: $('#ribbon'), ribbonStat: $('#ribbonStat'),
-  ribbonT0: $('#ribbonT0'), ribbonT1: $('#ribbonT1'),
+  ribbon: $('#ribbon'), trackFill: $('#trackFill'),
   segList: $('#segList'), listStat: $('#listStat'),
+  side: $('#side'), sideClose: $('#sideClose'), sideTabs: $('#sideTabs'),
+  sideMask: $('#sideMask'), sideMode: $('#sideMode'),
+  paneSegs: $('#paneSegs'), paneText: $('#paneText'),
+  btnList: $('#btnList'), btnSet: $('#btnSet'),
+  settings: $('#settings'), setClose: $('#setClose'),
   text: $('#text'), parseInfo: $('#parseInfo'), replyStat: $('#replyStat'),
   padFront: $('#padFront'), padBack: $('#padBack'),
   btnFetchReplies: $('#btnFetchReplies'), btnDemo: $('#btnDemo'), btnClear: $('#btnClear'),
@@ -43,6 +47,8 @@ var S = {
   uiMode: 'normal', muted: false, locked: false, keepUi: false,
   gesturing: false, scrubbing: false,
   resumeInfo: null, sharedTitle: null, lastPosSave: 0,
+  // 侧栏（片段+时间戳）默认收起，画面优先；sideMode: inline=内嵌 / float=右侧浮窗
+  sideOpen: false, sideMode: 'inline', sideTab: 'segs', settingsOpen: false,
 };
 
 /* ---------------------- 工具 ---------------------- */
@@ -315,7 +321,6 @@ function renderMeta(j) {
   el.vqn.textContent = (j.qualityName || '') + ' ' + (j.video.width || '?') + '×' + (j.video.height || '?');
   el.vsrc.textContent = j.pages && j.pages.length > 1 ? ('P' + j.page + '/' + j.pages.length) : '单 P';
   el.metaCard.hidden = false;
-  el.ribbonT1.textContent = fmt(j.duration);
 }
 
 /* ---------------------- 自动从评论拉时间戳 ---------------------- */
@@ -324,7 +329,7 @@ function applyMatched(matched, count, doReparse) {
   el.replyStat.textContent = '已扫 ' + (count || 0) + ' 条评论 · 匹配 ' + m.length + ' 个时间戳';
   el.autoStatus.hidden = false;
   el.autoStatus.textContent = m.length
-      ? ('自动从评论扫到 ' + m.length + ' 个时间戳（已填入下方文本框，可手动调整）')
+      ? ('自动从评论扫到 ' + m.length + ' 个时间戳')
       : '该视频评论区没扫到时间戳，可点「示例」或手动输入';
   if (m.length) {
     // 评论是按热度排序返回的，先按时间戳排序（顺带保证片段按时间顺序连播），
@@ -835,14 +840,18 @@ function keepSegVisible(node) {
 }
 function updateHud(ct, end) {
   var seg = S.segs[S.idx];
-  if (!seg) return;
+  if (!seg) { el.nowseg.textContent = S.segs.length ? ('0/' + S.segs.length + ' · 0:00') : '--:--'; return; }
   var done = Math.max(0, Math.min(seg.dur, ct - seg.start));
-  el.nowseg.textContent = '第 ' + (S.idx + 1) + ' / ' + S.segs.length + ' 段 · ' + fmt(seg.start + done);
+  // 控制条空间有限，段号用「当前/总数」的紧凑写法
+  el.nowseg.textContent = (S.idx + 1) + '/' + S.segs.length + ' · ' + fmt(seg.start + done);
 }
+/** 时间轴：游标 + 已播填充。两者都用「全片位置」表达，与时间轴上的分段块对齐 */
 function updateRibbonCursor(ct) {
+  if (!S.videoDuration) return;
+  var p = clamp(ct / S.videoDuration * 100, 0, 100);
   var cursor = el.ribbon.querySelector('.cursor');
-  if (!cursor || !S.videoDuration) return;
-  cursor.style.left = clamp(ct / S.videoDuration * 100, 0, 100) + '%';
+  if (cursor) cursor.style.left = p + '%';
+  if (el.trackFill) el.trackFill.style.width = p + '%';
 }
 
 function renderSegList() {
@@ -865,7 +874,12 @@ function renderSegList() {
   }
 }
 function renderRibbon() {
-  el.ribbon.innerHTML = '';
+  // 只清段块：.trk-fill 与 .cursor 是常驻节点，整块 innerHTML='' 会把它们一起清掉，
+  // 之后 updateRibbonCursor 就再也找不到游标（表现为进度指示不动）。
+  var olds = el.ribbon.querySelectorAll('.seg-block');
+  for (var n = 0; n < olds.length; n++) {
+    if (olds[n].parentNode) olds[n].parentNode.removeChild(olds[n]);
+  }
   var total = S.videoDuration || Math.max.apply(null, S.segs.map(function (s) { return s.start + s.dur; }).concat([1]));
   for (var i = 0; i < S.segs.length; i++) {
     (function (g, idx) {   // IIFE 包住 idx，否则 var 捕获会让所有块都跳最后一段
@@ -877,10 +891,13 @@ function renderRibbon() {
       el.ribbon.appendChild(b);
     })(S.segs[i], i);
   }
-  var c = document.createElement('div');
-  c.className = 'cursor';
-  c.style.left = '0%';
-  el.ribbon.appendChild(c);
+  if (!el.ribbon.querySelector('.cursor')) {
+    var c = document.createElement('div');
+    c.className = 'cursor';
+    c.style.left = '0%';
+    el.ribbon.appendChild(c);
+  }
+  if (el.trackFill) el.trackFill.style.width = '0%';
   el.ribbon.onclick = function (e) {
     if (!S.token || !S.segs.length) return;
     var r = el.ribbon.getBoundingClientRect();
@@ -905,7 +922,11 @@ function reparse() {
     renderRibbon();
     S.idx = -1;
     updateUI(true);
-    el.ribbonStat.textContent = res.segs.length + ' 段 · ' + fmt(res.segs.reduce(function (a, b) { return a + b.dur; }, 0));
+    // 侧栏默认收起，所以按钮上要有「里面有几段」的提示，否则用户不知道能点开
+    if (el.btnList) {
+      el.btnList.title = '片段 / 时间戳（' + res.segs.length + ' 段）';
+      el.btnList.classList.toggle('on', res.segs.length > 0 && !S.sideOpen);
+    }
     updateToggle();
     checkResume();
     console.log('[reparse] ok segs=' + res.segs.length);
@@ -976,10 +997,60 @@ function toggleMute() {
   if (!S.muted && S.audioBlocked) S.audioBlocked = false;
 }
 
+/* ---------------------- 侧栏（片段 + 时间戳）与二级设置 ---------------------- */
+/**
+ * 侧栏默认收起 —— 用户明确要求「给画面留出足够空间」：
+ * 片段列表和评论时间戳都是「要看才开」的辅助信息，不该常驻占屏。
+ * 两种形态二选一（设置里切换）：
+ *   inline：排在视频下方，宽屏时靠右侧成两列；
+ *   float ：覆盖在页面右侧的浮窗，点遮罩收起。
+ */
+function applySideMode() {
+  document.body.classList.toggle('side-float', S.sideMode === 'float');
+  document.body.classList.toggle('side-open', !!S.sideOpen);
+  if (el.sideMode) el.sideMode.value = S.sideMode;
+  if (el.side) el.side.hidden = !S.sideOpen;
+  if (el.sideMask) el.sideMask.hidden = !(S.sideOpen && S.sideMode === 'float');
+}
+function toggleSide(force) {
+  S.sideOpen = (force === undefined) ? !S.sideOpen : !!force;
+  if (S.sideOpen && S.settingsOpen) toggleSettings(false);
+  applySideMode();
+  // 展开时把当前段滚进可视区（只滚列表容器内部 —— scrollIntoView 会把播放器顶出屏幕）
+  if (S.sideOpen && S.sideTab === 'segs' && S.idx >= 0) {
+    var nodes = el.segList.querySelectorAll('.seg');
+    if (nodes[S.idx]) keepSegVisible(nodes[S.idx]);
+  }
+  if (el.btnList) el.btnList.classList.toggle('on', !S.sideOpen && S.segs.length > 0);
+  reportDiag('side-' + (S.sideOpen ? 'open' : 'close') + ' mode=' + S.sideMode);
+}
+function setSideMode(mode) {
+  S.sideMode = (mode === 'float') ? 'float' : 'inline';
+  safeSet('bilihl_side_mode', S.sideMode);
+  applySideMode();
+  BiliBridgeToast(S.sideMode === 'float' ? '片段面板：右侧浮窗' : '片段面板：内嵌');
+}
+function switchTab(tab) {
+  S.sideTab = (tab === 'text') ? 'text' : 'segs';
+  var btns = (el.sideTabs ? el.sideTabs.querySelectorAll('.stab') : []);
+  for (var i = 0; i < btns.length; i++) {
+    btns[i].classList.toggle('on', btns[i].getAttribute('data-tab') === S.sideTab);
+  }
+  if (el.paneSegs) el.paneSegs.classList.toggle('on', S.sideTab === 'segs');
+  if (el.paneText) el.paneText.classList.toggle('on', S.sideTab === 'text');
+}
+function toggleSettings(force) {
+  S.settingsOpen = (force === undefined) ? !S.settingsOpen : !!force;
+  if (el.settings) el.settings.hidden = !S.settingsOpen;
+}
+
 /* ---------------------- 全屏模式 ---------------------- */
 function setUiMode(mode) {
   S.uiMode = mode;
   if (mode === 'fullscreen') {
+    // 全屏要的是纯画面：侧栏与设置抽屉必须先收起，否则会叠在视频上
+    if (S.sideOpen) toggleSide(false);
+    if (S.settingsOpen) toggleSettings(false);
     document.body.classList.add('fullscreen');
     document.body.classList.remove('fs-hide');
     // 进入全屏时清掉可能的缩放（横屏后由 resize 重新计算）
@@ -1066,7 +1137,7 @@ function togglePlayPause() {
 }
 
 /* ---------------------- 手势（播放器内） ---------------------- */
-var gs = { x0: 0, y0: 0, t0: 0, dx: 0, dy: 0, moved: false, mode: null, lastTap: 0, locked: false };
+var gs = { x0: 0, y0: 0, t0: 0, dx: 0, dy: 0, moved: false, mode: null, lastTap: 0, locked: false, skip: false };
 
 function stageWidth() { return el.stage.clientWidth || window.innerWidth; }
 
@@ -1102,17 +1173,33 @@ function BiliBridgeToast(msg) {
   if (window.BiliBridge && BiliBridge.toast) { try { BiliBridge.toast(msg); } catch (e) {} }
 }
 
+/**
+ * 落点是不是「按钮」——播放器上的全屏叠层按钮（✕/🔒/📍）和右上角轻按钮（☰/⚙）。
+ * 这些按钮在 #stage 内部，触摸会冒泡到 stage 的手势处理。
+ */
+function isStageButton(target) {
+  if (!target || !target.closest) return false;
+  if (target.closest('.fs-btn')) return true;
+  if (target.closest('.ov-btn')) return true;
+  return false;
+}
 function onGestureStart(e) {
-  if (S.locked && e.target.id !== 'fsLock' && e.target.id !== 'fsKeep') return;
-  if (e.target.closest && e.target.closest('.fs-btn')) return; // 按钮自身处理
+  // 按钮自己有 onclick，手势必须整体让开。
+  // 关键：光在 touchstart 里 return 是不够的 —— touchend 仍会跑到 onGestureEnd
+  // 并执行单击逻辑，于是「点一下常显按钮，视频也跟着暂停了」（用户报的冲突）。
+  // 所以这里打一个 skip 标记，让 onGestureEnd 也一起跳过。
+  gs.skip = false;
+  if (isStageButton(e.target)) { gs.skip = true; return; }
+  if (S.locked && e.target.id !== 'fsLock' && e.target.id !== 'fsKeep') { gs.skip = true; return; }
   var t = e.touches[0];
   gs.x0 = t.clientX; gs.y0 = t.clientY; gs.t0 = performance.now();
   gs.moved = false; gs.mode = null; gs.dx = 0; gs.dy = 0;
   S.gesturing = true;
 }
 function onGestureMove(e) {
+  if (gs.skip) return;
   if (S.locked && e.target.id !== 'fsLock' && e.target.id !== 'fsKeep') return;
-  if (e.target.closest && e.target.closest('.fs-btn')) return;
+  if (isStageButton(e.target)) return;
   var t = e.touches[0];
   var dx = t.clientX - gs.x0, dy = t.clientY - gs.y0;
   gs.dx = dx; gs.dy = dy;
@@ -1139,6 +1226,8 @@ function onGestureMove(e) {
 }
 function onGestureEnd() {
   S.gesturing = false; S.scrubbing = false;
+  // 起点落在按钮上：整段手势作废，不产生单击/双击 —— 否则按钮会和播放/暂停打架
+  if (gs.skip) { gs.skip = false; gs.moved = false; gs.mode = null; return; }
   if (S.locked) { if (gs.moved) gs.moved = false; gs.mode = null; return; }
   var dt = performance.now() - gs.t0;
   if (!gs.moved) {
@@ -1209,7 +1298,26 @@ el.btnFetchReplies.onclick = function () {
   if (S.info && S.info.aid) fetchRepliesAndRender(S.info.aid);
   else setStatus('err', '请先解析视频');
 };
-el.btnTestVideo.onclick = function () { resolveVideo(TEST_BV); };
+el.btnTestVideo.onclick = function () { toggleSettings(false); resolveVideo(TEST_BV); };
+
+// 侧栏 / 二级设置
+el.btnList.onclick = function () { this.blur(); toggleSide(); };
+el.btnSet.onclick = function () { this.blur(); toggleSettings(); };
+el.setClose.onclick = function () { toggleSettings(false); };
+el.settings.onclick = function (e) { if (e.target === el.settings) toggleSettings(false); };
+el.sideClose.onclick = function () { toggleSide(false); };
+el.sideMask.onclick = function () { toggleSide(false); };
+el.sideMode.onchange = function () { setSideMode(el.sideMode.value); };
+el.sideTabs.onclick = function (e) {
+  // Chrome 74 有 closest，但为了跟老内核保持一致这里手动向上找，避免 className 是 SVGAnimatedString 的坑
+  var t = e.target;
+  while (t && t !== el.sideTabs) {
+    if (t.className && String(t.className).indexOf('stab') >= 0) break;
+    t = t.parentNode;
+  }
+  if (!t || t === el.sideTabs) return;
+  switchTab(t.getAttribute('data-tab'));
+};
 el.errRetry.onclick = function () {
   hideErr();
   if (S.info && S.info.bvid) resolveVideo(S.info.bvid);
@@ -1250,6 +1358,11 @@ document.addEventListener('keydown', function (e) {
   else if (e.key === 'ArrowRight') el.btnNext.click();
   else if (e.key === 'ArrowLeft') el.btnPrev.click();
   else if (e.key === 'KeyF') enterFullscreen();
+  else if (e.key === 'KeyL') toggleSide();
+  else if (e.key === 'Escape') {
+    if (S.settingsOpen) toggleSettings(false);
+    else if (S.sideOpen) toggleSide(false);
+  }
 });
 document.addEventListener('click', function () {
   if (!S.audioBlocked) return;
@@ -1423,6 +1536,11 @@ return;
   window.addEventListener('unhandledrejection', function (e) {
     console.error('[unhandled rejection] ' + ((e.reason && (e.reason.message || e.reason)) || e.reason));
   });
+  // 侧栏形态沿用上次选择；默认收起（画面优先）
+  var sm = safeGet('bilihl_side_mode');
+  if (sm === 'float' || sm === 'inline') S.sideMode = sm;
+  applySideMode();
+  switchTab('segs');
   buildDecks();
   reparse();
   updateToggle();

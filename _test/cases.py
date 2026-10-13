@@ -18,8 +18,19 @@ import time
 
 from harness import CaseResult, PASS, FAIL, SKIP, TEST_BV, TEST_URL
 
-# 播放用的短片段（秒），用于验证切段/预热/连播
-SHORT_SEGS = "0:00:20 6s A\\n0:00:40 6s B\\n0:01:00 6s C\\n0:01:20 6s D"
+# 播放用的短片段（秒），用于验证切段/预热/连播。
+# 为什么是 2s：套件里有多条用例要「等到自动切过 3 段」，段长直接决定这几条的耗时。
+# 6s×3 段要 ~18s，2s×3 段只要 ~6s——整轮套件能省下一半时间。
+# 段间隔 6s 是为了让下一次 seek 距离短、缓冲命中率高，切段更快也更稳。
+# 补时在 _fresh_playing 里被显式置 0，否则 2s 段会被 pad(1+2) 撑成 5s。
+SHORT_SEGS = "0:00:20 2s A\\n0:00:26 2s B\\n0:00:32 2s C\\n0:00:38 2s D"
+
+# 段长 2s 后，等「自动切过 3 段」的轮询窗口不需要 40s 那么长
+CUT_DEADLINE = 22
+
+# 旋转/session 用例要用长片段：旋转等待期间若片段只有 2s，播放会自动切到下一段，
+# 「idx 变了」会被误判成 session 丢失 —— 那是测试设计问题，不是产品问题。
+LONG_SEGS = "0:00:20 40s A\\n0:01:30 40s B"
 
 # 状态快照：一次拿全，避免多次 CDP 往返
 SNAP = r"""JSON.stringify({
@@ -86,6 +97,10 @@ def _fresh_playing(d, segs_js=SHORT_SEGS, wait=10):
             if (typeof stopAll === 'function') stopAll();
             S.loop = 'all';
             S.resolving = false; S.busy = false;
+            // 补时置 0：测试片段只要 2s，默认的 前补1s/后补2s 会把它撑成 5s，
+            // 让「等自动切段」的用例白白多等好几秒。
+            if (el.padFront) el.padFront.value = '0';
+            if (el.padBack) el.padBack.value = '0';
             el.text.value = "%s";
             reparse();
             jumpTo(0);
@@ -113,6 +128,8 @@ def _fresh_playing(d, segs_js=SHORT_SEGS, wait=10):
     try:
         d.cdp.js("""(function () {
           S.loop = 'all'; S.resolving = false; S.busy = false;
+          if (el.padFront) el.padFront.value = '0';
+          if (el.padBack) el.padBack.value = '0';
           el.text.value = "%s";
           reparse(); jumpTo(0);
           return 'kick2';
@@ -158,19 +175,24 @@ def c_resolve_cold(d):
     if not d.wait_page(timeout=30):
         return r.fail("冷启动后 WebView 不可达")
 
+    # timeout 给到 70s：之前默认 45s，慢的时候请求会被直接砍断成 code=0，
+    # 报告里只剩一个「code=0」，看不出到底是慢还是坏。放宽后能拿到真实耗时。
     t0 = time.time()
     code, _, body = d.http_probe(
         "http://127.0.0.1:8777/api/resolve?url=%s&p=1&qn=80" % TEST_BV,
-        want_body=True)
+        want_body=True, timeout=70)
     secs_f = time.time() - t0
-    if code != 200:
-        return r.fail("resolve 未返回 200（code=%s，%.1fs）：%s"
-                      % (code, secs_f, (body or "").strip()[:100]), seconds=secs_f)
-    if '"ok":true' not in (body or "").replace(" ", ""):
-        return r.fail("resolve 返回 200 但内容不是 ok=true：%s" % (body or "")[:120])
+    if code != 200 or '"ok":true' not in (body or "").replace(" ", ""):
+        # 附带本地服务自检：ping 通而 resolve 挂住 = 外网/握手慢；
+        # ping 都不通 = 应用自己没起来。两者修法完全不同，报告里必须分得清。
+        pcode, _, pbody = d.http_probe("http://127.0.0.1:8777/api/ping",
+                                       want_body=True, timeout=10)
+        return r.fail("resolve 未成功（code=%s，%.1fs，body=%s）；本地服务自检 ping=%s %s"
+                      % (code, secs_f, (body or "").strip()[:60], pcode,
+                         (pbody or "").strip()[:40]), seconds=round(secs_f, 2))
     # 阈值 20s：远高于实测（蜂窝网 0.3~2.8s），但能拦住「必超时 18s」这类回归
     if secs_f > 20:
-        return r.fail("首次解析 %.2fs 超出 20s 阈值（连接池/超时回归）" % secs_f,
+        return r.fail("首次解析 %.2fs 超出 20s 阈值（连接池/握手回归）" % secs_f,
                       seconds=round(secs_f, 2))
     return r.ok("首次解析 %.2fs" % secs_f, seconds=round(secs_f, 2))
 
@@ -212,7 +234,7 @@ def c_deeplink_share(d):
     d.log.clear()
     d.log.start()
     d.sh("monkey", "-p", "com.bilihl", "-c", "android.intent.category.LAUNCHER", "1")
-    time.sleep(6)
+    time.sleep(5)
     d.open_url(TEST_URL)
     if not d.wait_page(timeout=35):
         return r.fail("深链后 WebView 不可达")
@@ -303,8 +325,9 @@ def c_segment_autoplay(d):
     if not ok:
         return r.fail("无法进入播放状态")
     start_idx = s.get("idx")
-    # 外部轮询：只读 idx，不在页面里插桩，避免探针污染被测对象
-    seen, deadline = set(), time.time() + 40
+    # 外部轮询：只读 idx，不在页面里插桩，避免探针污染被测对象。
+    # 采样间隔 0.5s：段长只有 2s，1.2s 一次会整段漏采（明明切了却没采到）。
+    seen, deadline = set(), time.time() + CUT_DEADLINE
     while time.time() < deadline:
         snap = _snap(d)
         i = snap.get("idx")
@@ -312,10 +335,10 @@ def c_segment_autoplay(d):
             seen.add(i)
         if len(seen) >= 3:
             break
-        time.sleep(1.2)
+        time.sleep(0.5)
     if len(seen) < 2:
-        return r.fail("40s 内段索引没有前进（始终 idx=%s），自动连播失效" % sorted(seen),
-                      seen=sorted(seen))
+        return r.fail("%ds 内段索引没有前进（始终 idx=%s），自动连播失效"
+                      % (CUT_DEADLINE, sorted(seen)), seen=sorted(seen))
     return r.ok("自动切过 %d 段（经过 %s）" % (len(seen), sorted(seen)), seen=sorted(seen))
 
 
@@ -341,8 +364,9 @@ def c_no_veil_on_cut(d):
     except Exception as e:
         return r.fail("埋点安装失败：%s" % e)
 
-    # 等到段索引前进（确实切了一次段），再读计数
-    end = time.time() + 40
+    # 等到段索引前进（确实切了一次段），再读计数。
+    # 段长 2s，采样必须比段短，否则会「切过了但没采到」而误判成没切。
+    end = time.time() + CUT_DEADLINE
     moved = False
     while time.time() < end:
         try:
@@ -352,7 +376,7 @@ def c_no_veil_on_cut(d):
         if isinstance(cur, int) and cur >= 1:
             moved = True
             break
-        time.sleep(1.2)
+        time.sleep(0.5)
     try:
         veil = d.cdp.js("window.__veil || 0")
     except Exception:
@@ -360,7 +384,7 @@ def c_no_veil_on_cut(d):
     if veil is None:
         return r.fail("读不到 veil 计数（页面可能被重载了）")
     if not moved:
-        return r.fail("40s 内没有发生段切换，无法验证切段遮罩")
+        return r.fail("%ds 内没有发生段切换，无法验证切段遮罩" % CUT_DEADLINE)
     if veil > 0:
         return r.fail("切段过程中出现 %d 次加载遮罩（要求 0 次）" % veil, veilHits=veil)
     return r.ok("切段全程零遮罩", veilHits=veil)
@@ -395,9 +419,9 @@ def c_preheat_ready(d):
 def c_parse_eol(d):
     """特性：Windows/Linux/旧 Mac 三种换行都能解析（用户报过换行异常）"""
     r = CaseResult("三种换行符解析一致", "解析")
-    js = r"""JSON.stringify(['0:00:20 6s A\n0:00:40 6s B',
-                           '0:00:20 6s A\r\n0:00:40 6s B',
-                           '0:00:20 6s A\r0:00:40 6s B'].map(function (t) {
+    js = r"""JSON.stringify(['0:00:20 2s A\n0:00:26 2s B',
+                           '0:00:20 2s A\r\n0:00:26 2s B',
+                           '0:00:20 2s A\r0:00:26 2s B'].map(function (t) {
       var s = parseText(t, 10);
       return { n: s.segs.length, starts: s.segs.map(function (x) { return x.start; }) };
     }))"""
@@ -555,7 +579,7 @@ def c_layout(d):
 def c_rotate_session(d):
     """特性：旋转/切屏后 session 与进度保持（configChanges 全量接管）"""
     r = CaseResult("旋转保持 session 与进度", "会话")
-    ok, s = _fresh_playing(d)
+    ok, s = _fresh_playing(d, segs_js=LONG_SEGS)
     if not ok:
         return r.fail("无法进入播放状态")
     time.sleep(1.5)
@@ -565,11 +589,11 @@ def c_rotate_session(d):
     tok_before = (before.get("token") or "")[:8]
 
     d.rotate(1)
-    time.sleep(6)
+    time.sleep(4)
     after = _snap(d)
     dk2 = (after.get("decks") or [{}])[after.get("active", 0)] or {}
     d.rotate_restore()
-    time.sleep(2)
+    time.sleep(1.5)
 
     tok_after = (after.get("token") or "")[:8]
     if tok_before and tok_after and tok_before != tok_after:
@@ -669,6 +693,168 @@ def c_media_token_ttl(d):
 
 
 # ==========================================================================
+# 「画面优先」布局改造的用例
+#   这几条是这次改 UI 的直接验收点：顶部栏移除、控制条合并、
+#   片段/时间戳面板默认收起且可开可浮窗、低频设置进二级面板。
+#   都是纯 DOM/几何断言，跑得快，但能挡住「改回去了」「没生效」这类回归。
+# ==========================================================================
+def c_no_topbar(d):
+    """特性：顶部栏已移除（纵向空间还给画面）"""
+    r = CaseResult("顶部栏已移除", "布局")
+    out = d.cdp.js("""JSON.stringify((function () {
+      var st = document.getElementById('stage').getBoundingClientRect();
+      var wrap = document.getElementById('appWrap').getBoundingClientRect();
+      return { topbar: !!document.querySelector('.topbar'),
+               stageTop: Math.round(st.top - wrap.top) };
+    })())""")
+    if not isinstance(out, dict):
+        return r.fail("读取布局失败：%r" % (out,))
+    if out.get("topbar"):
+        return r.fail("页面里仍有 .topbar，顶部空间没还给画面")
+    if (out.get("stageTop") or 999) > 24:
+        return r.fail("播放器上方仍有 %spx 占用，顶部栏没真正移除" % out.get("stageTop"))
+    return r.ok("无顶部栏，播放器距容器顶 %spx" % out.get("stageTop"), top=out.get("stageTop"))
+
+
+def c_ctrl_merged(d):
+    """特性：播放按钮与时间轴合并进同一条控制条"""
+    r = CaseResult("播放按钮与时间轴合并成一条", "布局")
+    out = d.cdp.js("""JSON.stringify((function () {
+      var bar = document.querySelector('.ctrl-card');
+      if (!bar) return { err: 'no ctrl-card' };
+      var trk = document.getElementById('ribbon');
+      var btn = document.getElementById('btnToggle');
+      return {
+        sameBox: !!(trk && btn && bar.contains(trk) && bar.contains(btn)),
+        h: Math.round(bar.getBoundingClientRect().height),
+        separateRibbon: document.querySelectorAll('.ribbon-card').length,
+        segBlocks: trk ? trk.querySelectorAll('.seg-block').length : -1
+      };
+    })())""")
+    if not isinstance(out, dict) or out.get("err"):
+        return r.fail("控制条结构缺失：%s" % ((out or {}).get("err") or out))
+    if not out.get("sameBox"):
+        return r.fail("播放按钮与时间轴不在同一条控制条里（仍是分开的两块）")
+    if out.get("separateRibbon"):
+        return r.fail("仍存在独立的 .ribbon-card，时间轴没合并")
+    if (out.get("h") or 999) > 76:
+        return r.fail("控制条高 %spx，没起到精简作用（应 <=76）" % out.get("h"))
+    return r.ok("合并为一条，高 %spx，段块 %d 个" % (out.get("h"), out.get("segBlocks")),
+                height=out.get("h"))
+
+
+def c_side_hidden(d):
+    """特性：片段列表 + 评论时间戳合并进一个默认收起的面板"""
+    r = CaseResult("片段面板默认收起且已合并", "布局")
+    try:
+        d.cdp.js("(function(){ try{ toggleSide(false); }catch(e){} return 'x'; })()", timeout=10)
+    except Exception:
+        pass
+    time.sleep(0.4)
+    out = d.cdp.js("""JSON.stringify({
+      hidden: document.getElementById('side').hidden,
+      listIn: !!document.querySelector('#side #segList'),
+      textIn: !!document.querySelector('#side #text')
+    })""")
+    if not isinstance(out, dict):
+        return r.fail("读取侧栏状态失败：%r" % (out,))
+    if out.get("hidden") is not True:
+        return r.fail("侧栏默认展开（hidden=%s），会占掉画面空间" % out.get("hidden"))
+    if not (out.get("listIn") and out.get("textIn")):
+        return r.fail("片段列表与时间戳文本没有合并到同一个面板里")
+    return r.ok("默认收起，片段列表与时间戳已合并到同一面板")
+
+
+def c_side_toggle(d):
+    """特性：面板可由按钮开启，且能切成右侧浮窗"""
+    r = CaseResult("片段面板可开启并可切浮窗", "布局")
+    try:
+        d.cdp.js("toggleSide(true); 'open'", timeout=12)
+    except Exception as e:
+        return r.fail("打开面板失败：%s" % e)
+    time.sleep(0.5)
+    inline = d.cdp.js("""JSON.stringify({
+      hidden: document.getElementById('side').hidden,
+      w: Math.round(document.getElementById('side').getBoundingClientRect().width),
+      listH: Math.round(document.getElementById('segList').getBoundingClientRect().height)
+    })""")
+    if not isinstance(inline, dict):
+        return r.fail("读取面板状态失败：%r" % (inline,))
+    if inline.get("hidden") is not False:
+        return r.fail("点了开启后面板仍未显示（hidden=%s）" % inline.get("hidden"))
+    if (inline.get("listH") or 0) <= 0:
+        return r.fail("面板开了但片段列表高度为 0，等于没内容")
+
+    try:
+        d.cdp.js("setSideMode('float'); 'f'", timeout=12)
+    except Exception as e:
+        return r.fail("切换浮窗模式失败：%s" % e)
+    time.sleep(0.5)
+    fl = d.cdp.js("""JSON.stringify({
+      float: document.body.classList.contains('side-float'),
+      pos: getComputedStyle(document.getElementById('side')).position,
+      mask: !document.getElementById('sideMask').hidden,
+      right: Math.round(window.innerWidth - document.getElementById('side').getBoundingClientRect().right)
+    })""")
+    if not isinstance(fl, dict):
+        return r.fail("读取浮窗状态失败：%r" % (fl,))
+    if not fl.get("float") or fl.get("pos") != "fixed":
+        return r.fail("浮窗模式未生效（float=%s pos=%s）" % (fl.get("float"), fl.get("pos")))
+    if not fl.get("mask"):
+        return r.fail("浮窗模式下没有遮罩，无法点背后的画面收起")
+    # 注意不能写 (fl.get("right") or 999) —— 紧贴右侧时 right 就是 0，
+    # 0 是 falsy 会被换成 999，于是「贴得完美」反被判成没贴住。
+    right = fl.get("right")
+    if right is None or right > 4:
+        return r.fail("浮窗没有贴住右侧（右边距 %spx）" % right)
+
+    # 恢复默认（内嵌 + 收起），否则会污染后面的布局断言
+    try:
+        d.cdp.js("setSideMode('inline'); toggleSide(false); 'back'", timeout=12)
+    except Exception:
+        pass
+    return r.ok("内嵌→浮窗切换正常（内嵌宽 %spx，浮窗贴右 %spx）"
+                % (inline.get("w"), fl.get("right")),
+                inline_w=inline.get("w"), right=fl.get("right"))
+
+
+def c_settings_secondary(d):
+    """特性：补时 / 循环 / 倍速 / 音量 收进二级设置面板"""
+    r = CaseResult("低频设置收进二级设置面板", "布局")
+    out = d.cdp.js("""JSON.stringify({
+      panelHidden: document.getElementById('settings').hidden,
+      padIn: !!document.querySelector('#settings #padFront')
+             && !!document.querySelector('#settings #padBack'),
+      loopIn: !!document.querySelector('#settings #loop'),
+      rateIn: !!document.querySelector('#settings #rate'),
+      volIn: !!document.querySelector('#settings #vol'),
+      padOutside: document.querySelectorAll('.pad-row').length
+    })""")
+    if not isinstance(out, dict):
+        return r.fail("读取设置面板失败：%r" % (out,))
+    if not (out.get("padIn") and out.get("loopIn") and out.get("rateIn") and out.get("volIn")):
+        return r.fail("补时/循环/倍速/音量没有全部收进设置面板：%s"
+                      % json.dumps(out, ensure_ascii=False))
+    if out.get("padOutside"):
+        return r.fail("主界面仍残留 %d 个补时控件（.pad-row）" % out.get("padOutside"))
+    if out.get("panelHidden") is not True:
+        return r.fail("设置面板默认展开，会挡住画面")
+    try:
+        d.cdp.js("toggleSettings(true); 'o'", timeout=10)
+    except Exception as e:
+        return r.fail("打不开设置面板：%s" % e)
+    time.sleep(0.4)
+    opened = d.cdp.js("document.getElementById('settings').hidden")
+    try:
+        d.cdp.js("toggleSettings(false); 'c'", timeout=10)
+    except Exception:
+        pass
+    if opened is not False:
+        return r.fail("点了设置按钮后面板仍未打开（hidden=%s）" % opened)
+    return r.ok("补时/循环/倍速/音量均在二级设置内，默认收起且可开关")
+
+
+# ==========================================================================
 # 注册表：顺序 = 执行顺序（先基础能力，再播放，最后回归）
 # ==========================================================================
 CASES = [
@@ -690,6 +876,11 @@ CASES = [
     ("会话", c_rotate_session),
     ("兼容性", c_density),
     ("布局", c_layout),
+    ("布局", c_no_topbar),
+    ("布局", c_ctrl_merged),
+    ("布局", c_side_hidden),
+    ("布局", c_side_toggle),
+    ("布局", c_settings_secondary),
     ("分享", c_manual_fallback),
     ("稳定性", c_error_ui),
     ("稳定性", c_no_js_error),
