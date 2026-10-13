@@ -412,3 +412,101 @@ textarea#text:focus { border-color: var(--accent); }
   .ctrl-right .ctl { margin-right: 5px; }
   .ctl.vol { width: 60px; }
 }
+
+/* ============================================================
+   全屏 / 横屏模式（body.fullscreen）
+   播放器铺满屏幕，控制条 + 时间轴变为半透明叠加层，3 秒无操作自动隐藏。
+   兼容 Chrome 74：不用 inset / gap / aspect-ratio / clamp。
+   ============================================================ */
+body.fullscreen #appWrap {
+  position: fixed; left: 0; top: 0; right: 0; bottom: 0;
+  width: 100%; height: 100%;
+  transform: none !important; -webkit-transform: none !important;
+  overflow: hidden;
+}
+body.fullscreen .app, body.fullscreen .col-main {
+  position: static; display: block; max-width: none; margin: 0; padding: 0;
+}
+body.fullscreen .topbar,
+body.fullscreen .col-side,
+body.fullscreen .meta-card,
+body.fullscreen .statusbar { display: none !important; }
+
+body.fullscreen .player-wrap {
+  position: fixed; left: 0; top: 0; right: 0; bottom: 0;
+  width: 100%; height: 100%;
+  padding-top: 0; border-radius: 0;
+}
+body.fullscreen .player { top: 0; left: 0; right: 0; bottom: 0; }
+
+/* 全屏叠层按钮：退出 / 锁定（常驻，不参与自动隐藏） */
+.fs-btn {
+  position: absolute; z-index: 30; top: 8px;
+  width: 38px; height: 38px; border-radius: 50%;
+  border: none; color: #fff; background: rgba(0,0,0,.45);
+  font-size: 16px; line-height: 38px; text-align: center;
+  display: none; cursor: pointer;
+}
+#fsExit { left: 10px; }
+#fsLock { right: 10px; }
+body.fullscreen .fs-btn { display: block; }
+
+/* 中心播放/暂停闪现 */
+.center-play {
+  position: absolute; left: 50%; top: 50%; z-index: 22;
+  width: 66px; height: 66px; margin: -33px 0 0 -33px;
+  border-radius: 50%; background: rgba(0,0,0,.5); color: #fff;
+  font-size: 26px; line-height: 66px; text-align: center;
+  opacity: 0; pointer-events: none; -webkit-transition: opacity .18s; transition: opacity .18s;
+}
+.center-play.show { opacity: 1; }
+
+/* 拖动进度预览 */
+.seek-preview {
+  position: absolute; left: 50%; top: 22%; z-index: 24;
+  transform: translateX(-50%); -webkit-transform: translateX(-50%);
+  background: rgba(0,0,0,.7); color: #fff; font-size: 13px;
+  padding: 4px 10px; border-radius: 6px; opacity: 0; pointer-events: none;
+  -webkit-transition: opacity .15s; transition: opacity .15s;
+}
+.seek-preview.show { opacity: 1; }
+
+/* 控制条 / 时间轴叠加层（半透明），自动隐藏 */
+body.fullscreen .ctrl-card,
+body.fullscreen .ribbon-card {
+  position: fixed; left: 0; right: 0; z-index: 28;
+  background: rgba(0,0,0,.42); border-radius: 0;
+  box-shadow: none; margin: 0;
+  -webkit-transition: opacity .3s; transition: opacity .3s;
+}
+body.fullscreen .ctrl-card {
+  bottom: 0; padding: 8px 12px 10px;
+  background: -webkit-linear-gradient(bottom, rgba(0,0,0,.6), rgba(0,0,0,0));
+  background: linear-gradient(to top, rgba(0,0,0,.6), rgba(0,0,0,0));
+}
+body.fullscreen .ribbon-card {
+  bottom: 52px; padding: 4px 12px 6px;
+  background: rgba(0,0,0,.32);
+}
+body.fullscreen .ctrl-card .ibtn { background: rgba(255,255,255,.14); border-color: transparent; color: #fff; }
+body.fullscreen .ctrl-card .ibtn.play { background: var(--accent); }
+body.fullscreen .ctl { color: #e8e8e8; }
+body.fullscreen .ctl select { background: rgba(255,255,255,.12); color: #fff; border-color: rgba(255,255,255,.25); }
+body.fullscreen .ribbon { background: rgba(255,255,255,.22); }
+
+/* 自动隐藏：加 fs-hide 时整体淡出 */
+body.fs-hide .ctrl-card,
+body.fs-hide .ribbon-card { opacity: 0; pointer-events: none; }
+/* 锁定时隐藏所有叠加（仅留解锁按钮） */
+body.fs-lock .ctrl-card,
+body.fs-lock .ribbon-card { opacity: 0 !important; pointer-events: none; }
+
+/* 记忆播放 chip */
+.resume {
+  display: flex; align-items: center; flex-wrap: wrap;
+  margin-top: 8px; padding: 7px 9px; border-radius: 7px;
+  background: var(--accent-soft); color: var(--text-2); font-size: 11.5px;
+}
+.resume #resumeText { flex: 1; min-width: 0; margin-right: 6px; }
+.resume .mini-btn { padding: 4px 9px; font-size: 11px; margin-right: 4px; }
+.resume .mini-btn.ghost { background: #fff; }

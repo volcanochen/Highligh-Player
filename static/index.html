@@ -34,6 +34,14 @@
     <!-- 播放器（16:9） -->
     <div class="player-wrap">
       <div class="player" id="stage">
+        <!-- 全屏叠层按钮（仅全屏显示） -->
+        <button class="fs-btn" id="fsExit" title="退出全屏">✕</button>
+        <button class="fs-btn" id="fsLock" title="锁定">🔒</button>
+        <!-- 中心播放/暂停闪现 -->
+        <div class="center-play" id="centerPlay">▶</div>
+        <!-- 拖动进度预览 -->
+        <div class="seek-preview" id="seekPreview"></div>
+
         <div class="veil" id="veil">
           <div class="veil-spin"></div>
           <div class="veil-text" id="veilText">准备中…</div>
@@ -64,6 +72,11 @@
         <span class="meta-chip" id="vsrc">—</span>
       </div>
       <div class="auto-status" id="autoStatus" hidden></div>
+      <div class="resume" id="resume" hidden>
+        <span id="resumeText"></span>
+        <button class="mini-btn" id="resumeGo">继续播放</button>
+        <button class="mini-btn ghost" id="resumeReset">从头</button>
+      </div>
     </div>
 
     <!-- 集锦控制：开始 / 暂停 / 上一段 / 下一段 / 循环 / 倍速 -->
@@ -97,6 +110,7 @@
           <span>音量</span>
           <input id="vol" type="range" min="0" max="1" step="0.02" value="1">
         </label>
+        <button class="ibtn" id="btnMute" title="静音">🔊</button>
         <button class="ibtn" id="btnFull" title="全屏">⛶</button>
       </div>
     </div>

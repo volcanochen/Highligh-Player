@@ -1,6 +1,6 @@
 /* =============================================================
    B 站集锦 · 前端（B 站视频网站风格）
-   兼容目标：Chrome 74 WebView（不用 ??. ?? replaceAll :is() gap aspect-ratio clamp）
+   兼容目标：Chrome 74 WebView（不用 ??. ?? replaceAll :is() gap aspect-ratio clamp inset）
    ============================================================= */
 'use strict';
 
@@ -21,9 +21,14 @@ var el = {
   btnFetchReplies: $('#btnFetchReplies'), btnDemo: $('#btnDemo'), btnClear: $('#btnClear'),
   btnTestVideo: $('#btnTestVideo'),
   btnPrev: $('#btnPrev'), btnNext: $('#btnNext'), btnToggle: $('#btnToggle'), btnFull: $('#btnFull'),
+  btnMute: $('#btnMute'),
   loop: $('#loop'), rate: $('#rate'), vol: $('#vol'),
   statLeft: $('#statLeft'), statRight: $('#statRight'),
   nowseg: $('#nowseg'),
+  centerPlay: $('#centerPlay'),
+  fsExit: $('#fsExit'), fsLock: $('#fsLock'),
+  seekPreview: $('#seekPreview'),
+  resume: $('#resume'), resumeText: $('#resumeText'), resumeGo: $('#resumeGo'), resumeReset: $('#resumeReset'),
 };
 
 var S = {
@@ -34,6 +39,8 @@ var S = {
   qn: 80, page: 1, lastSwitchAt: 0, lastSync: 0, lastHud: 0, audioBlocked: false,
   resolving: false,
   decks: [], parsed: null,
+  uiMode: 'normal', muted: false, locked: false,
+  resumeInfo: null, sharedTitle: null, lastPosSave: 0,
 };
 
 /* ---------------------- 工具 ---------------------- */
@@ -124,6 +131,11 @@ function showErr(msg) {
   el.errLayer.hidden = false;
 }
 function hideErr() { el.errLayer.hidden = true; }
+
+/* ---------------------- localStorage 安全封装 ---------------------- */
+function safeGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+function safeSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+function safeDel(k) { try { localStorage.removeItem(k); } catch (e) {} }
 
 /* ---------------------- 文本解析 ---------------------- */
 function toSec(tok) {
@@ -218,11 +230,13 @@ async function resolveVideo(rawUrl) {
   if (!raw) { setStatus('err', '请提供视频链接'); return; }
   stopAll();
   S.token = null; S.info = null; S.hasAudio = false; S.videoDuration = 0;
+  S.resumeInfo = null;
   S.resolving = true;
   setNet('busy', '解析视频…');
   setStatus('busy', '解析中');
   setSub('');
   el.metaCard.hidden = true;
+  el.resume.hidden = true;
   el.btnFetchReplies.disabled = true;
   try {
     console.log('[resolve] fetching /api/resolve');
@@ -233,6 +247,7 @@ async function resolveVideo(rawUrl) {
       S.resolving = false;
       setNet('err', '解析失败');
       setStatus('err', j.error || '解析失败');
+      if (S.sharedTitle) { el.vtitle.textContent = S.sharedTitle; el.metaCard.hidden = false; }
       showErr(j.error || '解析失败');
       return false;
     }
@@ -247,6 +262,7 @@ async function resolveVideo(rawUrl) {
     // 自动拉评论
     fetchRepliesAndRender(j.aid);
     reparse();
+    checkResume();
     console.log('[resolve] done, token=' + (S.token || '').slice(0, 8) + ' dur=' + S.videoDuration);
     return true;
   } catch (e) {
@@ -260,7 +276,8 @@ async function resolveVideo(rawUrl) {
 }
 
 function renderMeta(j) {
-  el.vtitle.textContent = j.title || '—';
+  var title = (j.title && j.title.trim()) ? j.title : (S.sharedTitle || '—');
+  el.vtitle.textContent = title;
   el.vowner.textContent = j.owner || '—';
   el.vdur.textContent = '时长 ' + fmt(j.duration);
   el.vqn.textContent = (j.qualityName || '') + ' ' + (j.video.width || '?') + '×' + (j.video.height || '?');
@@ -331,7 +348,6 @@ function buildDecks() {
     v.playsInline = true; v.muted = true; v.preload = 'auto';
     v.setAttribute('playsinline', ''); v.setAttribute('webkit-playsinline', '');
     v.addEventListener('error', function () {
-      var k = S.active;
       setStatus('err', '视频流中断');
       showErr('视频元素报错 (readyState=' + v.readyState + '，networkState=' + v.networkState + ')');
     });
@@ -381,7 +397,7 @@ function showDeck(k) {
   S.decks.forEach(function (d, i) {
     d.el.classList.toggle('on', i === k);
     d.v.muted = true;
-    d.a.muted = (i !== k) || !S.hasAudio;
+    d.a.muted = (i !== k) || !S.hasAudio || S.muted;
     d.a.volume = clamp(S.vol, 0, 1);
     d.v.playbackRate = S.rate;
     d.a.playbackRate = S.rate;
@@ -446,6 +462,14 @@ async function jumpTo(i, opts) {
   veil(false);
   S.busy = false;
   updateUI(true);
+  // 记忆播放：跳转到指定片段内偏移
+  if (opts.seekOffset && opts.seekOffset > 0.05) {
+    var seg = S.segs[i];
+    var rt = seg.start + opts.seekOffset;
+    var cur = activeDeck();
+    try { cur.v.currentTime = rt; if (S.hasAudio) cur.a.currentTime = rt; } catch (e) {}
+    updateHud(rt, seg.start + seg.dur);
+  }
   prepareNext();
 }
 
@@ -453,6 +477,7 @@ function pauseAll() {
   S.playing = false;
   S.decks.forEach(function (d) { d.v.pause(); if (S.hasAudio) d.a.pause(); });
   updateToggle();
+  savePos();
 }
 async function resumeAll() {
   if (S.idx < 0) { if (S.segs.length) await jumpTo(0); return; }
@@ -481,6 +506,21 @@ function onSegmentEnd() {
   jumpTo(j, { text: '切换到第 ' + (j + 1) + ' 段' });
 }
 
+/* 相对/绝对 seek（手势拖动用，不重排片段） */
+function seekActiveTo(t) {
+  if (S.idx < 0 || !S.token) return;
+  var seg = S.segs[S.idx];
+  var rt = clamp(t, seg.start - S.lead, seg.start + seg.dur - 0.05);
+  var d = activeDeck();
+  try { d.v.currentTime = rt; if (S.hasAudio) d.a.currentTime = rt; } catch (e) {}
+  updateHud(rt, seg.start + seg.dur);
+}
+function doSeek(deltaSec) {
+  if (S.idx < 0) return;
+  var d = activeDeck();
+  seekActiveTo(d.v.currentTime + deltaSec);
+}
+
 /* 主循环：声画对时 + 段末切换 */
 function tick() {
   requestAnimationFrame(tick);
@@ -495,6 +535,8 @@ function tick() {
 
   var now = performance.now();
   if (now - S.lastHud > 100) { S.lastHud = now; updateHud(ct, end); updateRibbonCursor(ct); }
+  // 记忆播放：每 ~2s 落盘一次
+  if (now - S.lastPosSave > 2000) { S.lastPosSave = now; savePos(); }
 }
 
 function syncAudio() {
@@ -617,22 +659,221 @@ function reparse() {
   updateUI(true);
   el.ribbonStat.textContent = res.segs.length + ' 段 · ' + fmt(res.segs.reduce(function (a, b) { return a + b.dur; }, 0));
   updateToggle();
+  checkResume();
+}
+
+/* ---------------------- 记忆播放（续播） ---------------------- */
+function posKey() { return S.info && S.info.bvid ? ('bilihl_pos_' + S.info.bvid) : null; }
+function savePos() {
+  if (!S.playing || S.idx < 0 || !S.token) return;
+  var key = posKey();
+  if (!key) return;
+  var d = activeDeck();
+  if (!d || !d.v || !isFinite(d.v.currentTime)) return;
+  safeSet(key, JSON.stringify({ idx: S.idx, t: d.v.currentTime }));
+}
+function checkResume() {
+  el.resume.hidden = true;
+  var key = posKey();
+  if (!key || !S.segs.length) return;
+  var raw = safeGet(key);
+  if (!raw) return;
+  try {
+    var p = JSON.parse(raw);
+    if (p && typeof p.idx === 'number' && p.idx >= 0 && p.idx < S.segs.length && isFinite(p.t)) {
+      S.resumeInfo = p;
+      var seg = S.segs[p.idx];
+      el.resumeText.textContent = '上次看到 第 ' + (p.idx + 1) + ' 段 ' + fmt(seg.authStart || seg.start)
+        + '（' + fmt(p.t - seg.start) + ' 处）';
+      el.resume.hidden = false;
+    }
+  } catch (e) {}
+}
+
+/* ---------------------- 静音 ---------------------- */
+function applyMute() {
+  S.decks.forEach(function (d, i) {
+    d.a.muted = (i !== S.active) || !S.hasAudio || S.muted;
+    d.a.volume = clamp(S.vol, 0, 1);
+  });
+  el.btnMute.textContent = S.muted ? '🔇' : '🔊';
+  el.btnMute.title = S.muted ? '取消静音' : '静音';
+}
+function toggleMute() {
+  S.muted = !S.muted;
+  applyMute();
+  if (!S.muted && S.audioBlocked) S.audioBlocked = false;
+}
+
+/* ---------------------- 全屏模式 ---------------------- */
+function setUiMode(mode) {
+  S.uiMode = mode;
+  if (mode === 'fullscreen') {
+    document.body.classList.add('fullscreen');
+    document.body.classList.remove('fs-hide');
+    // 进入全屏时清掉可能的缩放（横屏后由 resize 重新计算）
+    var w = document.querySelector('#appWrap');
+    if (w) { w.style.transform = ''; w.style.webkitTransform = ''; }
+    if (typeof revealFsControls === 'function') revealFsControls();
+  } else {
+    document.body.classList.remove('fullscreen', 'fs-hide', 'fs-lock');
+    S.locked = false;
+    applyViewportScale();
+  }
+}
+function enterFullscreen() {
+  if (window.BiliBridge && BiliBridge.toggleFullScreen) BiliBridge.toggleFullScreen();
+  else setUiMode('fullscreen');
+}
+var fsTimer = 0;
+function revealFsControls() {
+  if (S.uiMode !== 'fullscreen') return;
+  document.body.classList.remove('fs-hide');
+  if (fsTimer) clearTimeout(fsTimer);
+  fsTimer = setTimeout(function () { document.body.classList.add('fs-hide'); }, 3200);
+}
+function hideFsControls() { document.body.classList.add('fs-hide'); }
+
+/* 中心播放/暂停图标闪现 */
+function flashCenter(playing) {
+  el.centerPlay.textContent = playing ? '❚❚' : '▶';
+  el.centerPlay.classList.add('show');
+  clearTimeout(el.centerPlay._t);
+  el.centerPlay._t = setTimeout(function () { el.centerPlay.classList.remove('show'); }, 600);
+}
+
+/* 暂停/播放切换（供按钮与手势共用） */
+function togglePlayPause() {
+  if (S.idx < 0 && S.segs.length) { jumpTo(0); return; }
+  if (S.playing) pauseAll(); else resumeAll();
+  flashCenter(S.playing);
+}
+
+/* ---------------------- 手势（播放器内） ---------------------- */
+var gs = { x0: 0, y0: 0, t0: 0, dx: 0, dy: 0, moved: false, mode: null, lastTap: 0, locked: false };
+
+function stageWidth() { return el.stage.clientWidth || window.innerWidth; }
+
+function dxToTime(dx) {
+  if (!S.videoDuration) return 0;
+  return dx / stageWidth() * S.videoDuration * 1.2;
+}
+function updateSeekPreview(dx) {
+  if (S.idx < 0) return;
+  var d = activeDeck();
+  var target = clamp(d.v.currentTime + dxToTime(dx), 0, S.videoDuration);
+  el.seekPreview.textContent = '↔ ' + fmt(target);
+  el.seekPreview.classList.add('show');
+}
+function hideSeekPreview() { el.seekPreview.classList.remove('show'); }
+
+function adjustVol(delta) {
+  S.vol = clamp(S.vol - delta * 0.005, 0, 1);
+  el.vol.value = S.vol;
+  S.decks.forEach(function (d) { d.a.volume = S.vol; });
+  if (S.muted && S.vol > 0) { S.muted = false; applyMute(); }
+  BiliBridgeToast('音量 ' + Math.round(S.vol * 100) + '%');
+}
+function adjustBright(delta) {
+  if (!window.BiliBridge || !BiliBridge.getBrightness) return;
+  var cur = BiliBridge.getBrightness();
+  if (typeof cur !== 'number' || cur < 0) cur = 1;
+  var v = clamp(cur - delta * 0.004, 0.05, 1);
+  BiliBridge.setBrightness(v);
+  BiliBridgeToast('亮度 ' + Math.round(v * 100) + '%');
+}
+function BiliBridgeToast(msg) {
+  if (window.BiliBridge && BiliBridge.toast) { try { BiliBridge.toast(msg); } catch (e) {} }
+}
+
+function onGestureStart(e) {
+  if (S.locked && e.target.id !== 'fsLock') return;
+  if (e.target.closest && e.target.closest('.fs-btn')) return; // 按钮自身处理
+  var t = e.touches[0];
+  gs.x0 = t.clientX; gs.y0 = t.clientY; gs.t0 = performance.now();
+  gs.moved = false; gs.mode = null; gs.dx = 0; gs.dy = 0;
+}
+function onGestureMove(e) {
+  if (S.locked && e.target.id !== 'fsLock') return;
+  if (e.target.closest && e.target.closest('.fs-btn')) return;
+  var t = e.touches[0];
+  var dx = t.clientX - gs.x0, dy = t.clientY - gs.y0;
+  gs.dx = dx; gs.dy = dy;
+  if (Math.abs(dx) > 8 || Math.abs(dy) > 8) gs.moved = true;
+  if (S.uiMode !== 'fullscreen') return; // 普通模式不做滑动手势
+  if (gs.mode === null && (Math.abs(dx) > 10 || Math.abs(dy) > 10)) {
+    if (Math.abs(dx) > Math.abs(dy)) gs.mode = 'seek';
+    else gs.mode = (gs.x0 < window.innerWidth / 2) ? 'bright' : 'vol';
+  }
+  if (gs.mode === 'seek') {
+    e.preventDefault();
+    updateSeekPreview(dx);
+  } else if (gs.mode === 'vol') {
+    e.preventDefault();
+    adjustVol(-(t.clientY - (gs.lastY || gs.y0)));
+    gs.lastY = t.clientY;
+  } else if (gs.mode === 'bright') {
+    e.preventDefault();
+    adjustBright(-(t.clientY - (gs.lastY || gs.y0)));
+    gs.lastY = t.clientY;
+  }
+}
+function onGestureEnd() {
+  if (S.locked) { if (gs.moved) gs.moved = false; return; }
+  var dt = performance.now() - gs.t0;
+  if (!gs.moved) {
+    handleTap();
+  } else if (S.uiMode === 'fullscreen') {
+    if (gs.mode === 'seek') { doSeek(dxToTime(gs.dx)); hideSeekPreview(); }
+  }
+  gs.moved = false; gs.mode = null;
+}
+function handleTap() {
+  var now = performance.now();
+  if (now - gs.lastTap < 300) {
+    gs.lastTap = 0;
+    // 双击
+    if (S.uiMode !== 'fullscreen') { enterFullscreen(); flashCenter(S.playing); }
+    else {
+      var left = gs.x0 < window.innerWidth / 2;
+      doSeek(left ? -10 : 10);
+      revealFsControls();
+    }
+  } else {
+    gs.lastTap = now;
+    setTimeout(function () {
+      if (gs.lastTap && performance.now() - gs.lastTap >= 290) {
+        gs.lastTap = 0;
+        togglePlayPause();
+        if (S.uiMode === 'fullscreen') revealFsControls();
+      }
+    }, 300);
+  }
+}
+function bindGestures() {
+  el.stage.addEventListener('touchstart', onGestureStart, { passive: true });
+  el.stage.addEventListener('touchmove', onGestureMove, { passive: false });
+  el.stage.addEventListener('touchend', onGestureEnd, { passive: true });
+  // 全屏下任意触摸都唤起控制条
+  document.addEventListener('touchstart', function () { if (S.uiMode === 'fullscreen') revealFsControls(); }, true);
 }
 
 /* ---------------------- 事件 ---------------------- */
-// 示例文本：时间戳控制在测试视频（BV1GJ411x7h7，3:33）长度内，否则会被"超出片尾"过滤掉
 var DEMO = '0:00:12 10s 前奏起\n0:00:38 12s 主歌进\n0:01:15 10s 副歌\n0:01:52 12s 间奏\n0:02:20 10s 二段主歌\n0:02:55 15s 尾段副歌\n0:03:20 8s 收尾';
 var TEST_BV = 'BV1GJ411x7h7';   // bilibili 官方"测试视频"短片
 
 el.btnPrev.onclick = function () { if (S.idx > 0) jumpTo(S.idx - 1); else if (S.segs.length) jumpTo(S.segs.length - 1); };
 el.btnNext.onclick = function () { var j = nextIndex(S.idx); if (j >= 0) jumpTo(j); };
-el.btnToggle.onclick = function () {
-  if (S.idx < 0 && S.segs.length) { jumpTo(0); return; }
-  if (S.playing) pauseAll(); else resumeAll();
-};
-el.btnFull.onclick = function () {
-  if (document.fullscreenElement) document.exitFullscreen();
-  else if (el.stage.requestFullscreen) el.stage.requestFullscreen();
+el.btnToggle.onclick = function () { togglePlayPause(); };
+el.btnFull.onclick = function () { enterFullscreen(); };
+el.btnMute.onclick = function () { toggleMute(); };
+el.fsExit.onclick = function () { enterFullscreen(); };
+el.fsLock.onclick = function () {
+  S.locked = !S.locked;
+  document.body.classList.toggle('fs-lock', S.locked);
+  el.fsLock.textContent = S.locked ? '🔓' : '🔒';
+  BiliBridgeToast(S.locked ? '已锁定，防误触' : '已解锁');
+  revealFsControls();
 };
 el.btnDemo.onclick = function () { el.text.value = DEMO; console.log('[demo] fill', DEMO.split('\n').length, 'lines'); reparse(); };
 el.btnClear.onclick = function () { el.text.value = ''; reparse(); };
@@ -646,6 +887,15 @@ el.errRetry.onclick = function () {
   if (S.info && S.info.bvid) resolveVideo(S.info.bvid);
   else setStatus('err', '没有可重试的视频');
 };
+el.resumeGo.onclick = function () {
+  if (!S.resumeInfo) return;
+  var p = S.resumeInfo;
+  var seg = S.segs[p.idx];
+  if (!seg) return;
+  el.resume.hidden = true;
+  jumpTo(p.idx, { seekOffset: p.t - seg.start, text: '续播 第 ' + (p.idx + 1) + ' 段' });
+};
+el.resumeReset.onclick = function () { var k = posKey(); if (k) safeDel(k); S.resumeInfo = null; el.resume.hidden = true; };
 el.loop.onchange = function () { S.loop = el.loop.value; };
 el.rate.onchange = function () {
   S.rate = +el.rate.value;
@@ -653,7 +903,7 @@ el.rate.onchange = function () {
 };
 el.vol.oninput = function () {
   S.vol = +el.vol.value;
-  S.decks.forEach(function (d, i) { d.a.volume = S.vol; d.a.muted = (i !== S.active) || !S.hasAudio; });
+  S.decks.forEach(function (d, i) { d.a.volume = S.vol; d.a.muted = (i !== S.active) || !S.hasAudio || S.muted; });
 };
 el.padFront.onchange = function () { S.padFront = +el.padFront.value || 0; reparse(); };
 el.padBack.onchange = function () { S.padBack = +el.padBack.value || 0; reparse(); };
@@ -664,6 +914,7 @@ document.addEventListener('keydown', function (e) {
   if (e.code === 'Space') { e.preventDefault(); el.btnToggle.click(); }
   else if (e.key === 'ArrowRight') el.btnNext.click();
   else if (e.key === 'ArrowLeft') el.btnPrev.click();
+  else if (e.key === 'KeyF') enterFullscreen();
 });
 document.addEventListener('click', function () {
   if (!S.audioBlocked) return;
@@ -674,13 +925,14 @@ document.addEventListener('click', function () {
 }, true);
 
 /* ---------------------- 启动 ---------------------- */
-// 由 native share intent 写入的 BV / URL（?bv=xxx）；?demo=1 时自动填示例文本并开播
 function loadFromNative() {
   var q;
   try { q = new URLSearchParams(location.search); } catch (e) { return; }
   var bv = q.get('bv');
   var demo = q.get('demo') === '1';
-  console.log('[init] bv=' + bv + ' demo=' + demo + ' cssW=' + window.innerWidth + ' dpr=' + window.devicePixelRatio);
+  var title = q.get('title');
+  if (title) S.sharedTitle = title;
+  console.log('[init] bv=' + bv + ' demo=' + demo + ' title=' + title + ' cssW=' + window.innerWidth + ' dpr=' + window.devicePixelRatio);
   if (bv) {
     console.log('[init] calling resolveVideo(' + bv + ')');
     resolveVideo(bv).then(function (ok) {
@@ -696,7 +948,6 @@ function loadFromNative() {
   }
 }
 
-// 轮询等 token + 片段就绪后自动开播（resolve 是异步的，不能假定 1.5s 就好）
 function waitAndPlay(tries) {
   if (S.token && S.segs.length > 0 && S.idx < 0) { el.btnToggle.click(); return; }
   if (tries > 80) { setStatus('err', '自动播放等待超时'); return; }   // ~40s
@@ -707,6 +958,7 @@ function waitAndPlay(tries) {
 // 而页面按 ~420 CSS px 设计。用 wrap 容器整体 scale 补偿（topbar/statusbar 在 wrap 外，不受影响）。
 // 注意：脚本执行时 WebView 可能还没布局（innerWidth=0），这时必须跳过，否则 scale(0) 会把页面缩没。
 function applyViewportScale() {
+  if (document.body.classList.contains('fullscreen')) return; // 全屏横屏由 CSS 接管
   var cssW = window.innerWidth;
   if (cssW < 40) return;   // 未布局/异常宽度，不动
   var natural = 420;
@@ -729,19 +981,19 @@ function applyViewportScale() {
 }
 
 (function init() {
-  // 全局错误兜底：静默失败时至少能在 logcat 看到
   window.addEventListener('error', function (e) {
     console.error('[window error] ' + (e.message || e) + ' @' + (e.filename || '') + ':' + (e.lineno || ''));
   });
   window.addEventListener('unhandledrejection', function (e) {
-    console.error('[unhandled rejection] ' + (e.reason && (e.reason.message || e.reason)) || e.reason);
+    console.error('[unhandled rejection] ' + ((e.reason && (e.reason.message || e.reason)) || e.reason));
   });
   buildDecks();
   reparse();
   updateToggle();
+  applyMute();
+  bindGestures();
   requestAnimationFrame(tick);
   fetch('/api/ping').then(function (r) {
-    // resolve 进行中不要被 ping 回调覆盖状态
     if (S.resolving) return;
     if (r.ok) { setNet('ok', '本地服务就绪'); setStatus('ok', '就绪'); }
     else { setNet('err', '本地服务异常'); setStatus('err', '本地服务异常'); }
@@ -751,7 +1003,6 @@ function applyViewportScale() {
   });
   applyViewportScale();
   window.addEventListener('resize', applyViewportScale);
-  // 脚本执行时可能尚未布局（innerWidth=0），补一次延迟测量
   requestAnimationFrame(function () { setTimeout(applyViewportScale, 60); });
   loadFromNative();
 })();
