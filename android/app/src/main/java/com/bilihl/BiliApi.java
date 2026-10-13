@@ -309,24 +309,39 @@ return out;
         return h;
     }
 
+    /**
+     * 取 GET 文本。
+     *
+     * 【必须 disconnect 的原因】原来这里读完 body 就不管了，
+     * 而 body 不一定被读到 EOF（例如服务端返回错误页、连接被重置），
+     * 此时 keep-alive 连接既没被复用也没被归还，
+     * HttpURLConnection 的连接池很快被占满（默认每 host 5 个），
+     * 后续请求只能排队等新连接 —— 表现为「第一次解析卡满 18s 超时，之后再点又秒开」。
+     * 用 try-with-resources 包住 InputStream 并在 finally 里 disconnect，
+     * 保证异常路径也能把连接还回去。
+     */
     static String httpGetString(String url, Map<String, String> headers) throws IOException {
         HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
-        forceV4(c);
-        c.setRequestMethod("GET");
-        c.setConnectTimeout(10000);
-        c.setReadTimeout(20000);
-        if (headers != null) for (Map.Entry<String, String> e : headers.entrySet())
-            c.setRequestProperty(e.getKey(), e.getValue());
-        int code = c.getResponseCode();
-        InputStream in = (code >= 200 && code < 300) ? c.getInputStream() : c.getErrorStream();
-        StringBuilder sb = new StringBuilder();
-        if (in != null) {
-            try (BufferedReader r = new BufferedReader(new InputStreamReader(in, "UTF-8"))) {
-                String line;
-                while ((line = r.readLine()) != null) sb.append(line).append('\n');
+        try {
+            forceV4(c);
+            c.setRequestMethod("GET");
+            c.setConnectTimeout(10000);
+            c.setReadTimeout(20000);
+            if (headers != null) for (Map.Entry<String, String> e : headers.entrySet())
+                c.setRequestProperty(e.getKey(), e.getValue());
+            int code = c.getResponseCode();
+            InputStream in = (code >= 200 && code < 300) ? c.getInputStream() : c.getErrorStream();
+            StringBuilder sb = new StringBuilder();
+            if (in != null) {
+                try (BufferedReader r = new BufferedReader(new InputStreamReader(in, "UTF-8"))) {
+                    String line;
+                    while ((line = r.readLine()) != null) sb.append(line).append('\n');
+                }
             }
+            return sb.toString();
+        } finally {
+            try { c.disconnect(); } catch (Exception ignore) {}
         }
-        return sb.toString();
     }
 
     static String md5hex(String s) {
