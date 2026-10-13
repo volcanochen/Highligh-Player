@@ -1,0 +1,73 @@
+# B站集锦播放器 (Highligh-Player)
+
+把 B 站视频里的「集锦时间戳」（评论区常见的 `0:04:02 17s 动作名` 之类）变成一段**连续播放的高光集锦**。
+从 B 站分享一个视频过来，自动扫评论里的时间戳，拼成一条时间轴，无缝连播。
+
+## 功能
+
+1. **接收 B 站分享**：注册了 `ACTION_SEND`（分享到本应用）和 `ACTION_VIEW` 深度链接，
+   分享/点开 B 站视频链接直接进播放器，无需手动输入或粘贴。
+2. **短链支持**：自动展开 `b23.tv` 短链（跟随 302，失败时解析返回体里的真实链接），也支持完整 URL、`BV 号`、`av 号`。
+3. **评论自动抓集锦**：解析视频后自动拉取评论区（多页），用正则匹配时间戳，
+   按时间排序并推断每段时长（相邻间隔，封顶 30s，保底 3s），自动填入文本框，可手动调整。
+4. **视频网站风格界面**：以播放器为主体，控制（上一段/播放/下一段、循环、倍速、音量）放在下方/侧边；
+   窄屏单列、宽屏两列，兼容**接近方形的大折叠屏**。
+5. **无缝连播**：双 `<video>` 预载 + 段末切换，视频与音频分离代理，播放中切换片段画面不移位。
+
+## 目录结构
+
+```
+.
+├── static/                 # 前端（B 站视频网站风格）：index.html / app.js / style.css
+├── server.py               # 桌面开发服务器（本地 HTTP + /api/resolve /api/replies /api/media 代理）
+├── start.cmd               # Windows 一键起桌面版
+├── android/                # Android 应用（内置同源本地服务，WebView 加载前端）
+│   ├── app/src/main/java/com/bilihl/
+│   │   ├── MainActivity.java   # 分享/深链解析、WebView、密度与视口处理
+│   │   ├── ProxyServer.java    # 本机 HTTP 服务（静态托管 + API 代理）
+│   │   └── BiliApi.java        # view → wbi 签名 → playurl 取流，评论抓取
+│   ├── build_apk.sh / build_apk.bat   # 免 Gradle 离线构建
+│   └── make_apk.py             # 合并 dex + assets
+└── _test/                  # 单元测试
+```
+
+## 构建 Android APK（免 Gradle，纯 SDK 工具链）
+
+需要：JDK 17（Android Studio 自带 jbr 亦可）、Android SDK `build-tools`、`platforms/android-34`。
+
+```bash
+bash android/build_apk.sh      # Git Bash / Linux / macOS
+# 或 Windows: android\build_apk.bat
+```
+
+流程：`aapt2 compile/link → javac → d8 → 合并 dex+assets → zipalign → apksigner`。
+首次构建会在 `android/keystore.jks` 自动生成一个自签名 keystore（**该文件已被 .gitignore 排除，请勿提交**）。
+
+产物：`android/bili-highlight.apk`。
+
+## 运行桌面版（调试前端）
+
+```bash
+python server.py
+# 浏览器打开 http://127.0.0.1:8777/
+```
+
+## 兼容性说明（重要）
+
+- **目标**：Android 9+ 的老机器（系统 WebView 内核可能只有 Chrome 74）。
+  前端刻意不用 `inset` 简写、flex `gap`、`?.`/`??`、`:is()`、`clamp()`、`aspect-ratio` 等新特性。
+- **强制 IPv4**：老安卓在部分网络下会优先走 IPv6，而运营商 IPv6 不通，导致连 B 站 API 时
+  长时间挂起（连 20s 连接超时都不触发）。`MainActivity` 中 `java.net.preferIPv4Stack=true` 规避。
+- **屏幕兼容模式**：`AndroidManifest.xml` 必须声明 `targetSdkVersion`，否则系统按 targetSdk=1 处理，
+  把 App 塞进 320dp 小窗口拉伸，导致 UI 放大数倍、WebView CSS 视口异常、点击错位。
+
+## 测试
+
+```bash
+# extractTarget() 分享文本解析单测（BV/av/短链/完整 URL）
+# 编译方式见 android/build_apk.sh 的 javac 步骤，测试类在 _test/BiliIntentTest.java
+```
+
+## 免责声明
+
+仅供个人学习研究使用。视频内容版权归哔哩哔哩及原作者所有，请勿用于任何商业用途。
