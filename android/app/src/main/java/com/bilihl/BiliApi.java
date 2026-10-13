@@ -12,8 +12,14 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
+import java.net.Inet4Address;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.Socket;
 import java.net.URL;
 import java.security.MessageDigest;
+import javax.net.ssl.HttpsURLConnection;
+import javax.net.ssl.SSLSocketFactory;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -22,7 +28,12 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 /**
  * B 站取流核心：view -> nav(wbi) -> playurl，与桌面 server.py 逻辑一致，纯标准库实现。
@@ -35,6 +46,58 @@ public final class BiliApi {
             + "(KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36";
 
     static final long RANGE_CAP = 3L * 1024 * 1024; // 单次回传上限，避免为一个 seek 拖下整个文件
+
+    // 解析主流程的并行请求池（view/spi/nav/playurl 分片，互不依赖）
+    static final ExecutorService POOL = Executors.newFixedThreadPool(4);
+    // 评论分页单独一个池：fetchReplies 会在解析池的线程里被调用并阻塞等待分页结果，
+    // 若与解析共用一个池会造成嵌套提交->饥饿死锁，故分开。
+    static final ExecutorService REPLY_POOL = Executors.newFixedThreadPool(6);
+
+    // 解析结果缓存：key = bvid|qn|page，5 分钟内复用，避免重复拉流/签名（重开同一视频近乎秒开）
+    static final Map<String, long[]> RESOLVE_TS = new ConcurrentHashMap<>();
+    static final Map<String, JSONObject> RESOLVE_CACHE = new ConcurrentHashMap<>();
+    static String resolveKey(String raw, int qn, int page) {
+        String[] t = parseTarget(raw);
+        return t[0].toLowerCase() + "|" + qn + "|" + page;
+    }
+
+    // 强制走 IPv4：部分网络环境（如本机测试机）对 api.bilibili.com 的 IPv6 路由是死的，
+    // 而 Android 9 的 HttpURLConnection 不会自动回退 IPv4（无 Happy-Eyeballs），
+    // 导致每个 API 请求都在 IPv6 上挂满超时 -> 解析极慢。这里自建 SSLSocketFactory，
+    // 先把主机解析到 IPv4 地址再建连，SNI/证书校验仍用原始域名，安全且快速。
+    static InetAddress toV4(String host) throws IOException {
+        InetAddress[] all = InetAddress.getAllByName(host);
+        for (InetAddress a : all) if (a instanceof Inet4Address) return a;
+        return InetAddress.getByName(host);
+    }
+
+    static final SSLSocketFactory FORCE_V4_SF = new SSLSocketFactory() {
+        private final SSLSocketFactory base = (SSLSocketFactory) SSLSocketFactory.getDefault();
+        public String[] getDefaultCipherSuites() { return base.getDefaultCipherSuites(); }
+        public String[] getSupportedCipherSuites() { return base.getSupportedCipherSuites(); }
+        public Socket createSocket() throws IOException { return base.createSocket(); }
+        public Socket createSocket(Socket s, String host, int port, boolean autoClose) throws IOException {
+            return base.createSocket(s, host, port, autoClose);
+        }
+        public Socket createSocket(String host, int port) throws IOException {
+            Socket plain = new Socket();
+            plain.connect(new InetSocketAddress(toV4(host), port), 10000);
+            return base.createSocket(plain, host, port, true);
+        }
+        public Socket createSocket(String host, int port, InetAddress la, int lp) throws IOException {
+            return createSocket(host, port);
+        }
+        public Socket createSocket(InetAddress host, int port) throws IOException {
+            return createSocket(host.getHostAddress(), port);
+        }
+        public Socket createSocket(InetAddress host, int port, InetAddress la, int lp) throws IOException {
+            return createSocket(host.getHostAddress(), port);
+        }
+    };
+
+    static void forceV4(HttpURLConnection c) {
+        if (c instanceof HttpsURLConnection) ((HttpsURLConnection) c).setSSLSocketFactory(FORCE_V4_SF);
+    }
 
     static final int[] MIXIN_TAB = {
             46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35, 27, 43, 5, 49,
@@ -59,17 +122,34 @@ public final class BiliApi {
         QUALITY_NAME.put(127, "8K 超高清");
     }
 
-    /** 拉取评论，最多 max 页（每页 ps 条），返回所有 message 字段构成的数组 */
+    /** 拉取评论，最多 max 页（每页 ps 条），各页并行抓取，返回所有 message 字段构成的数组 */
     static JSONArray fetchReplies(String aid, int maxPages, int ps) {
         JSONArray out = new JSONArray();
         if (aid == null || aid.isEmpty()) return out;
+        if (ps > 20) ps = 20;  // B 站 /x/v2/reply 现要求 ps<=20，否则返回 -400 ps out of bounds
+        final int fps = ps;
+        long t0 = System.currentTimeMillis();
         try {
+            List<Future<String>> futs = new ArrayList<>();
             for (int pn = 1; pn <= maxPages; pn++) {
-                String url = "https://api.bilibili.com/x/v2/reply?type=1&oid=" + aid
-                        + "&pn=" + pn + "&ps=" + ps + "&sort=2&web_location=1315875";
-                String body = httpGetString(url, apiHeaders(lastCookie.isEmpty() ? null : lastCookie));
+                final int p = pn;
+                futs.add(REPLY_POOL.submit(new Callable<String>() {
+                    public String call() throws Exception {
+                        String url = "https://api.bilibili.com/x/v2/reply?type=1&oid=" + aid
+                                + "&pn=" + p + "&ps=" + fps + "&sort=2&web_location=1315875";
+                        return httpGetString(url, apiHeaders(lastCookie.isEmpty() ? null : lastCookie));
+                    }
+                }));
+            }
+            for (Future<String> f : futs) {
+                String body;
+                try { body = f.get(15, TimeUnit.SECONDS); }
+                catch (Exception e) { continue; }
                 JSONObject o = new JSONObject(body);
-                if (o.optInt("code") != 0) break;
+                if (o.optInt("code") != 0) {
+                    Log.w(TAG, "reply code=" + o.optInt("code") + " msg=" + o.optString("message") + " ps=" + fps);
+                    break;
+                }
                 JSONObject data = o.optJSONObject("data");
                 if (data == null) break;
                 JSONArray replies = data.optJSONArray("replies");
@@ -93,6 +173,8 @@ public final class BiliApi {
         } catch (Exception e) {
             Log.w(TAG, "fetchReplies: " + e.getMessage());
         }
+        Log.i(TAG, "fetchReplies " + aid + " pages=" + maxPages + " count=" + out.length()
+                + " took=" + (System.currentTimeMillis() - t0) + "ms");
         return out;
     }
 
@@ -167,8 +249,9 @@ public final class BiliApi {
 
     static String httpGetString(String url, Map<String, String> headers) throws IOException {
         HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
+        forceV4(c);
         c.setRequestMethod("GET");
-        c.setConnectTimeout(20000);
+        c.setConnectTimeout(10000);
         c.setReadTimeout(20000);
         if (headers != null) for (Map.Entry<String, String> e : headers.entrySet())
             c.setRequestProperty(e.getKey(), e.getValue());
@@ -330,18 +413,71 @@ public final class BiliApi {
 
     // ---------------------------------------------------------------- 解析视频
     static JSONObject resolve(String raw, int page, int qn, String cookieUser) throws Exception {
+        long t0 = System.currentTimeMillis();
         String[] t = parseTarget(raw);
         String bvid = t[0];
         int bvidPage = Integer.parseInt(t[1]);
         if (page <= 1) page = bvidPage;
 
+        String cacheKey = resolveKey(raw, qn, page);
+        long now0 = System.currentTimeMillis();
+        JSONObject cached = RESOLVE_CACHE.get(cacheKey);
+        if (cached != null && now0 - RESOLVE_TS.getOrDefault(cacheKey, new long[]{0})[0] < 300_000) {
+            Log.i(TAG, "resolve " + bvid + " cache HIT (" + (System.currentTimeMillis() - t0) + "ms)");
+            return cached;
+        }
+
         String viewUrl = bvid.toLowerCase().startsWith("av")
                 ? "https://api.bilibili.com/x/web-interface/view?aid=" + bvid.substring(2)
                 : "https://api.bilibili.com/x/web-interface/view?bvid=" + bvid;
-        JSONObject view = new JSONObject(httpGetString(viewUrl, apiHeaders(null)));
+        Map<String, String> h = apiHeaders(null);
+
+        // 并行抓取三个互不依赖的请求：view / buvid(spi) / wbi(nav)，把 4 次串行往返压成 2 批
+        final long[] ms = new long[3];
+        Future<String> fView = POOL.submit(new Callable<String>() {
+            public String call() throws Exception {
+                long s = System.currentTimeMillis();
+                try {
+                    return httpGetString(viewUrl, h);
+                } catch (Exception e1) {
+                    // 弱网/基站切换偶发握手失败，重试一次，避免直接抛"解析失败"
+                    Log.w(TAG, "view fetch failed (" + e1 + "), retry once");
+                    try { Thread.sleep(300); } catch (Exception ignore) {}
+                    return httpGetString(viewUrl, h);
+                } finally { ms[0] = System.currentTimeMillis() - s; }
+            }
+        });
+        Future<String> fSpi = POOL.submit(new Callable<String>() {
+            public String call() throws Exception { long s = System.currentTimeMillis(); try { return httpGetString("https://api.bilibili.com/x/frontend/finger/spi", h); } finally { ms[1] = System.currentTimeMillis() - s; } }
+        });
+        Future<String> fNav = POOL.submit(new Callable<String>() {
+            public String call() throws Exception { long s = System.currentTimeMillis(); try { return httpGetString("https://api.bilibili.com/x/web-interface/nav", h); } finally { ms[2] = System.currentTimeMillis() - s; } }
+        });
+
+        String viewBody;
+        String spiBody = "";
+        String navBody = "";
+        try { viewBody = fView.get(18, TimeUnit.SECONDS); }
+        catch (Exception e) { throw new RuntimeException("取视频信息失败（网络超时）"); }
+        try { spiBody = fSpi.get(15, TimeUnit.SECONDS); } catch (Exception ignore) {}
+        try { navBody = fNav.get(15, TimeUnit.SECONDS); } catch (Exception ignore) {}
+
+        JSONObject view = new JSONObject(viewBody);
         if (view.optInt("code") != 0)
             throw new RuntimeException("取视频信息失败：" + view.optString("message"));
         JSONObject v = view.getJSONObject("data");
+
+        // 评论与时间戳：与 playurl 并行抓取（仅依赖 aid），内联进解析结果，省掉前端二次请求
+        final String aidStr = String.valueOf(v.optLong("aid"));
+        Future<JSONObject> fReplies = POOL.submit(new Callable<JSONObject>() {
+            public JSONObject call() throws Exception {
+                JSONArray r = fetchReplies(aidStr, 5, 20);
+                JSONObject o = new JSONObject();
+                o.put("count", r.length());
+                o.put("matched", extractTimestamps(r));
+                return o;
+            }
+        });
 
         JSONArray pages = v.optJSONArray("pages");
         if (page < 1) page = 1;
@@ -354,9 +490,23 @@ public final class BiliApi {
             part = pg.optString("part");
         } else cid = v.getLong("cid");
 
-        String buvid = buvidCookie();
+        // buvid cookie（spi 失败则退化空串，不影响 playurl 基础可用性）
+        String buvid = "";
+        try {
+            JSONObject o = new JSONObject(spiBody).getJSONObject("data");
+            buvid = "buvid3=" + o.optString("b_3", "") + "; buvid4=" + o.optString("b_4", "");
+            buvidCookie = buvid; buvidTs = System.currentTimeMillis();
+        } catch (Exception ignore) {}
         String cookie = (buvid + " " + (cookieUser == null ? "" : cookieUser.trim())).trim();
         lastCookie = cookie;
+
+        // wbi 密钥（优先用本次并发抓到的 nav；失败则退回缓存）
+        try {
+            JSONObject img = new JSONObject(navBody).getJSONObject("data").getJSONObject("wbi_img");
+            String ik = img.getString("img_url").replaceAll(".*/", "").replaceAll("\\..*", "");
+            String sk = img.getString("sub_url").replaceAll(".*/", "").replaceAll("\\..*", "");
+            if (!ik.isEmpty() && !sk.isEmpty()) { wbiKey = new String[]{ik, sk}; wbiTs = System.currentTimeMillis(); }
+        } catch (Exception ignore) {}
 
         Map<String, String> q = new LinkedHashMap<>();
         q.put("bvid", v.getString("bvid"));
@@ -367,8 +517,10 @@ public final class BiliApi {
         q.put("fourk", "1");
         String signed = wbiSign(q);
 
+        long tp0 = System.currentTimeMillis();
         JSONObject pu = new JSONObject(httpGetString(
                 "https://api.bilibili.com/x/player/wbi/playurl?" + signed, apiHeaders(cookie)));
+        long msPu = System.currentTimeMillis() - tp0;
         if (pu.optInt("code") != 0)
             throw new RuntimeException("取播放地址失败：" + pu.optString("message"));
         JSONObject data = pu.getJSONObject("data");
@@ -378,6 +530,12 @@ public final class BiliApi {
         JSONObject vs = pickStream(dash.optJSONArray("video"), qn);
         JSONObject as = pickAudio(dash.optJSONArray("audio"));
         if (vs == null) throw new RuntimeException("没有可用的视频流");
+
+        // 收齐并行抓取到的评论/时间戳（失败则降级为空，不阻塞解析）
+        JSONObject repObj = new JSONObject();
+        repObj.put("count", 0);
+        repObj.put("matched", new JSONArray());
+        try { repObj = fReplies.get(12, TimeUnit.SECONDS); } catch (Exception ignore) {}
 
         String token = UUID.randomUUID().toString().replace("-", "");
         MediaEntry me = new MediaEntry();
@@ -433,7 +591,15 @@ public final class BiliApi {
         aud.put("id", as != null ? as.optInt("id") : 0);
         aud.put("bandwidth", as != null ? as.optInt("bandwidth") : 0);
         out.put("audio", aud);
+        out.put("replyCount", repObj.optInt("count"));
+        out.put("matched", repObj.optJSONArray("matched"));
         out.put("loggedIn", cookieUser != null && cookieUser.matches(".*SESSDATA=[^;]+.*"));
+
+        if (RESOLVE_CACHE.size() > 64) { RESOLVE_CACHE.clear(); RESOLVE_TS.clear(); }
+        RESOLVE_CACHE.put(cacheKey, out);
+        RESOLVE_TS.put(cacheKey, new long[]{System.currentTimeMillis()});
+        Log.i(TAG, "resolve " + bvid + " timings(ms): view=" + ms[0] + " buvid=" + ms[1]
+                + " wbi=" + ms[2] + " playurl=" + msPu + " total=" + (System.currentTimeMillis() - t0));
         return out;
     }
 
@@ -452,6 +618,7 @@ public final class BiliApi {
         for (String url : rotated) {
             try {
                 HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
+                forceV4(c);
                 c.setRequestMethod("GET");
                 c.setRequestProperty("User-Agent", UA);
                 c.setRequestProperty("Referer", "https://www.bilibili.com/");

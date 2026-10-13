@@ -128,8 +128,8 @@ public class ProxyServer extends Thread {
         } else if ("/api/replies".equals(path)) {
             Map<String, String> q = parseQuery(query);
             String aid = q.getOrDefault("aid", "");
-            int maxPages = parseInt(q.get("pages"), 4);
-            int ps = parseInt(q.get("ps"), 30);
+            int maxPages = parseInt(q.get("pages"), 5);
+            int ps = parseInt(q.get("ps"), 20);
             try {
                 if (aid.isEmpty()) throw new RuntimeException("缺少 aid");
                 JSONArray replies = BiliApi.fetchReplies(aid, maxPages, ps);

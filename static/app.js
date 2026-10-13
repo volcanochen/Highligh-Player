@@ -259,8 +259,10 @@ async function resolveVideo(rawUrl) {
     setStatus('ok', '已解析');
     setSub(fmt(j.duration) + ' · ' + j.qualityName);
     el.btnFetchReplies.disabled = false;
-    // 自动拉评论
-    fetchRepliesAndRender(j.aid);
+    // 解析结果已内联时间戳（与 playurl 并行抓取）：有内联结果（即便为空）就直接用，避免重复拉评论；
+    // 只有服务端没返回 matched 字段时才回退到单独接口
+    if (j.matched !== undefined && j.matched !== null) applyMatched(j.matched || [], j.replyCount || 0, false);
+    else fetchRepliesAndRender(j.aid);
     reparse();
     checkResume();
     console.log('[resolve] done, token=' + (S.token || '').slice(0, 8) + ' dur=' + S.videoDuration);
@@ -287,6 +289,40 @@ function renderMeta(j) {
 }
 
 /* ---------------------- 自动从评论拉时间戳 ---------------------- */
+function applyMatched(matched, count, doReparse) {
+  var m = matched || [];
+  el.replyStat.textContent = '已扫 ' + (count || 0) + ' 条评论 · 匹配 ' + m.length + ' 个时间戳';
+  el.autoStatus.hidden = false;
+  el.autoStatus.textContent = m.length
+      ? ('自动从评论扫到 ' + m.length + ' 个时间戳（已填入下方文本框，可手动调整）')
+      : '该视频评论区没扫到时间戳，可点「示例」或手动输入';
+  if (m.length) {
+    // 评论是按热度排序返回的，先按时间戳排序（顺带保证片段按时间顺序连播），
+    // 再用相邻间隔推断每段时长（封顶 30s，保底 3s），末段用 10s
+    var items = [];
+    for (var i = 0; i < m.length; i++) {
+      var mm = m[i];
+      var s0 = toSec(mm.time || '');
+      var s1 = mm.end ? toSec(mm.end) : null;
+      if (s0 == null) continue;
+      items.push({ m: mm, s0: s0, s1: s1 });
+    }
+    items.sort(function (a, b) { return a.s0 - b.s0; });
+    var lines = items.map(function (it, i) {
+      var d;
+      if (it.s1 != null && it.s1 > it.s0) d = Math.max(3, Math.min(60, it.s1 - it.s0));
+      else if (i + 1 < items.length && items[i + 1].s0 > it.s0) d = Math.max(3, Math.min(30, items[i + 1].s0 - it.s0));
+      else d = 10;
+      var tm = it.m.time || '';
+      var end = it.m.end ? '-' + it.m.end : '';
+      var note = it.m.text ? it.m.text.replace(/\s+/g, ' ').trim() : '';
+      return (tm + end + ' ' + d.toFixed(0) + 's ' + note).trim();
+    });
+    el.text.value = lines.join('\n');
+    if (doReparse) reparse();
+  }
+}
+
 async function fetchRepliesAndRender(aid) {
   if (!aid) return;
   el.replyStat.textContent = '拉取评论中…';
@@ -294,44 +330,14 @@ async function fetchRepliesAndRender(aid) {
   el.autoStatus.textContent = '正在拉取评论…';
   el.btnFetchReplies.disabled = true;
   try {
-    var j = await (await fetch('/api/replies?aid=' + aid + '&pages=3&ps=30')).json();
+    var j = await (await fetch('/api/replies?aid=' + aid + '&pages=5&ps=20')).json();
     el.btnFetchReplies.disabled = false;
     if (!j.ok) {
       el.replyStat.textContent = '评论拉取失败';
       el.autoStatus.textContent = '评论拉取失败：' + (j.error || '');
       return;
     }
-    var matched = j.matched || [];
-    el.replyStat.textContent = '已扫 ' + (j.count || 0) + ' 条评论 · 匹配 ' + matched.length + ' 个时间戳';
-    el.autoStatus.textContent = matched.length
-        ? ('自动从评论扫到 ' + matched.length + ' 个时间戳（已填入下方文本框，可手动调整）')
-        : '该视频评论区没扫到时间戳，可点「示例」或手动输入';
-    el.autoStatus.hidden = false;
-    if (matched.length) {
-      // 评论是按热度排序返回的，先按时间戳排序（顺带保证片段按时间顺序连播），
-      // 再用相邻间隔推断每段时长（封顶 30s，保底 3s），末段用 10s
-      var items = [];
-      for (var i = 0; i < matched.length; i++) {
-        var m = matched[i];
-        var s0 = toSec(m.time || '');
-        var s1 = m.end ? toSec(m.end) : null;
-        if (s0 == null) continue;
-        items.push({ m: m, s0: s0, s1: s1 });
-      }
-      items.sort(function (a, b) { return a.s0 - b.s0; });
-      var lines = items.map(function (it, i) {
-        var d;
-        if (it.s1 != null && it.s1 > it.s0) d = Math.max(3, Math.min(60, it.s1 - it.s0));
-        else if (i + 1 < items.length && items[i + 1].s0 > it.s0) d = Math.max(3, Math.min(30, items[i + 1].s0 - it.s0));
-        else d = 10;
-        var tm = it.m.time || '';
-        var end = it.m.end ? '-' + it.m.end : '';
-        var note = it.m.text ? it.m.text.replace(/\s+/g, ' ').trim() : '';
-        return (tm + end + ' ' + d.toFixed(0) + 's ' + note).trim();
-      });
-      el.text.value = lines.join('\n');
-      reparse();
-    }
+    applyMatched(j.matched || [], j.count || 0, true);
   } catch (e) {
     el.replyStat.textContent = '评论拉取失败';
     el.autoStatus.textContent = '评论拉取失败：' + e.message;
