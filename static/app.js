@@ -154,10 +154,16 @@ function toSec(tok) {
   return null;
 }
 
+function normalizeEol(s) {
+return (s == null ? '' : String(s)).replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+}
+
 function parseText(raw, fallbackDur) {
-  fallbackDur = fallbackDur || 10;
-  var segs = [], bad = [], warn = [];
-  var lines = (raw || '').split(/\r?\n/);
+fallbackDur = fallbackDur || 10;
+var segs = [], bad = [], warn = [];
+// 换行兼容：Windows(\r\n) / 旧 Mac(\r) / Linux(\n) 统一按 \n 切分，
+// 否则 \r 残留会让时间戳与备注文本被截断或挤成一行
+var lines = normalizeEol(raw).split('\n');
   for (var n = 0; n < lines.length; n++) {
     var s = (lines[n] || '').trim();
     if (!s) continue;
@@ -300,25 +306,31 @@ function applyMatched(matched, count, doReparse) {
     // 评论是按热度排序返回的，先按时间戳排序（顺带保证片段按时间顺序连播），
     // 再用相邻间隔推断每段时长（封顶 30s，保底 3s），末段用 10s
     var items = [];
-    for (var i = 0; i < m.length; i++) {
-      var mm = m[i];
-      var s0 = toSec(mm.time || '');
-      var s1 = mm.end ? toSec(mm.end) : null;
-      if (s0 == null) continue;
-      items.push({ m: mm, s0: s0, s1: s1 });
-    }
-    items.sort(function (a, b) { return a.s0 - b.s0; });
-    var lines = items.map(function (it, i) {
-      var d;
-      if (it.s1 != null && it.s1 > it.s0) d = Math.max(3, Math.min(60, it.s1 - it.s0));
-      else if (i + 1 < items.length && items[i + 1].s0 > it.s0) d = Math.max(3, Math.min(30, items[i + 1].s0 - it.s0));
-      else d = 10;
-      var tm = it.m.time || '';
-      var end = it.m.end ? '-' + it.m.end : '';
-      var note = it.m.text ? it.m.text.replace(/\s+/g, ' ').trim() : '';
-      return (tm + end + ' ' + d.toFixed(0) + 's ' + note).trim();
-    });
-    el.text.value = lines.join('\n');
+for (var i = 0; i < m.length; i++) {
+var mm = m[i];
+var s0 = toSec(mm.time || '');
+// end 可能是 "mm:ss+N"（服务端标记显式时长），这种不能当区间终点
+var s1 = (mm.end && mm.end.indexOf('+') < 0) ? toSec(mm.end) : null;
+if (s0 == null) continue;
+items.push({ m: mm, s0: s0, s1: s1 });
+}
+items.sort(function (a, b) { return a.s0 - b.s0; });
+var lines = items.map(function (it, i) {
+var d;
+// 服务端给出的显式时长（评论里写了「0:06:48 9s」）优先
+if (it.m.dur > 0) d = it.m.dur;
+else if (it.s1 != null && it.s1 > it.s0) d = Math.max(3, Math.min(60, it.s1 - it.s0));
+else if (i + 1 < items.length && items[i + 1].s0 > it.s0) d = Math.max(3, Math.min(30, items[i + 1].s0 - it.s0));
+else d = 10;
+var tm = it.m.time || '';
+var end = (it.s1 != null) ? '-' + it.m.end : '';
+var note = normalizeEol(it.m.text || '').replace(/\s+/g, ' ').trim();
+// 服务端未能剔除评论里的裸时长（如「0:06:48 9s …」），这里再兜底一次，
+// 否则文本框会出现「0:06:48 18s 9s V m」这种重复数值
+note = note.replace(/^\d+(?:\.\d+)?\s*(?:s|sec|秒)\s*/i, '').trim();
+return (tm + end + ' ' + d.toFixed(0) + 's ' + note).trim();
+});
+el.text.value = normalizeEol(lines.join('\n'));
     if (doReparse) reparse();
   }
 }
@@ -387,7 +399,10 @@ async function prepare(d, i, lead) {
   if (d.v.readyState < 1) await once(d.v, 'loadedmetadata', 15000);
   if (S.hasAudio && d.a.readyState < 1) await once(d.a, 'loadedmetadata', 15000);
   if (d.v.readyState < 1) {
-    console.error('video loadedmetadata timeout, readyState=' + d.v.readyState + ' networkState=' + d.v.networkState);
+    console.error('video loadedmetadata timeout, readyState=' + d.v.readyState + ' networkState=' + d.v.networkState
+        + ' errCode=' + (d.v.error ? d.v.error.code : '-') + ' src=' + (d.v.currentSrc || d.v.src || '(none)'));
+    reportDiag('prepare-fail rs=' + d.v.readyState + ' net=' + d.v.networkState
+        + ' err=' + (d.v.error ? d.v.error.code : '-'));
     return false;
   }
   await seekTo(d.v, t);
@@ -543,6 +558,14 @@ function tick() {
   if (now - S.lastHud > 100) { S.lastHud = now; updateHud(ct, end); updateRibbonCursor(ct); }
   // 记忆播放：每 ~2s 落盘一次
   if (now - S.lastPosSave > 2000) { S.lastPosSave = now; savePos(); }
+  // 周期性状态上报：便于在无法截图/点击的设备上通过 logcat 观测播放是否真的在推进、
+  // 段末是否自动切换（这两项在真机上肉眼难验证，却最容易被机型差异破坏）
+  if (now - (S.lastDiag || 0) > 5000) {
+    S.lastDiag = now;
+    console.log('[tick] idx=' + S.idx + '/' + S.segs.length + ' playing=' + S.playing
+        + ' busy=' + S.busy + ' t=' + ct.toFixed(2) + ' end=' + end.toFixed(2)
+        + ' paused=' + cur.v.paused + ' rs=' + cur.v.readyState + ' net=' + cur.v.networkState);
+  }
 }
 
 function syncAudio() {
@@ -654,18 +677,27 @@ function renderRibbon() {
 }
 
 function reparse() {
-  S.padFront = +el.padFront.value || 0;
-  S.padBack = +el.padBack.value || 0;
-  var res = parseText(el.text.value, 10);
-  S.segs = res.segs; S.parsed = res;
-  renderParseInfo(res);
-  renderSegList();
-  renderRibbon();
-  S.idx = -1;
-  updateUI(true);
-  el.ribbonStat.textContent = res.segs.length + ' 段 · ' + fmt(res.segs.reduce(function (a, b) { return a + b.dur; }, 0));
-  updateToggle();
-  checkResume();
+  try {
+    S.padFront = +el.padFront.value || 0;
+    S.padBack = +el.padBack.value || 0;
+    var res = parseText(el.text.value, 10);
+    S.segs = res.segs; S.parsed = res;
+    renderParseInfo(res);
+    renderSegList();
+    renderRibbon();
+    S.idx = -1;
+    updateUI(true);
+    el.ribbonStat.textContent = res.segs.length + ' 段 · ' + fmt(res.segs.reduce(function (a, b) { return a + b.dur; }, 0));
+    updateToggle();
+    checkResume();
+    console.log('[reparse] ok segs=' + res.segs.length);
+  } catch (e) {
+    // 逐段定位是哪个渲染函数在不同内核/机型上抛错，避免整条链路静默中断
+    console.error('[reparse] FAILED: ' + (e && e.message ? e.message : e)
+        + ' @' + (e && e.stack ? String(e.stack).split('\n')[1] : ''));
+    reportDiag('reparse-fail ' + (e && e.message ? e.message : e));
+    throw e;
+  }
 }
 
 /* ---------------------- 记忆播放（续播） ---------------------- */
@@ -931,6 +963,62 @@ document.addEventListener('click', function () {
 }, true);
 
 /* ---------------------- 启动 ---------------------- */
+/**
+ * 把前端内部状态回传原生日志。
+ * 必要原因：部分机型（带密码锁屏）无法截图/点击，logcat 是唯一可观测通道。
+ * 同时打印关键元素的布局信息，用于排查「视口宽度差异导致布局/点击错位」。
+ */
+function reportDiag(tag) {
+  var parts = [];
+  try {
+    parts.push('cssW=' + window.innerWidth + 'x' + window.innerHeight);
+var st = document.querySelector('#stage');
+if (st) {
+var r = st.getBoundingClientRect();
+parts.push('stage=' + Math.round(r.width) + 'x' + Math.round(r.height)
++ '@' + Math.round(r.left) + ',' + Math.round(r.top));
+//逐级量宽度：定位「视频区塌陷」到底出在哪个父级
+['#appWrap', '#app', '.col-main', '.player-wrap'].forEach(function (sel) {
+var e = document.querySelector(sel);
+if (!e) return;
+var b = e.getBoundingClientRect();
+var cs = window.getComputedStyle(e);
+parts.push(sel + '=' + Math.round(b.width) + 'x' + Math.round(b.height)
++ '/maxW=' + cs.maxWidth + '/disp=' + cs.display + '/padT=' + cs.paddingTop);
+});
+}
+    var vids = document.querySelectorAll('video');
+    parts.push('videos=' + vids.length);
+    for (var i = 0; i < vids.length; i++) {
+      var v = vids[i];
+      var vb = v.getBoundingClientRect();
+      parts.push('v' + i + '[src=' + (v.currentSrc || v.src || '(none)').slice(-28)
+          + ' rs=' + v.readyState + ' net=' + v.networkState
+          + ' err=' + (v.error ? v.error.code : '-')
+          + ' box=' + Math.round(vb.width) + 'x' + Math.round(vb.height) + ']');
+    }
+    parts.push('segs=' + (S && S.segs ? S.segs.length : 0));
+    // 列表项位置：真机无法截图时用于定位点击坐标，也用于验证布局在不同视口下是否合理
+    var items = document.querySelectorAll('#segList .seg');
+    if (items.length) {
+      var f = items[Math.min(2, items.length - 1)].getBoundingClientRect();
+      parts.push('segItems=' + items.length + ' item2=' + Math.round(f.left) + ',' + Math.round(f.top)
+          + ' ' + Math.round(f.width) + 'x' + Math.round(f.height));
+    } else {
+      parts.push('segItems=0');
+    }
+    var lst = document.querySelector('#segList');
+    if (lst) { var lb = lst.getBoundingClientRect(); parts.push('listBox=' + Math.round(lb.left) + ',' + Math.round(lb.top) + ' ' + Math.round(lb.width) + 'x' + Math.round(lb.height)); }
+    var aw = document.querySelector('#appWrap');
+    if (aw) parts.push('wrapTf=' + (aw.style.transform || 'none'));
+  } catch (e) {
+    parts.push('diagErr=' + e.message);
+  }
+  var line = '[diag:' + tag + '] ' + parts.join(' | ');
+  console.log(line);
+  try { if (window.BiliBridge && BiliBridge.diag) BiliBridge.diag(line); } catch (e2) {}
+}
+
 function loadFromNative() {
   var q;
   try { q = new URLSearchParams(location.search); } catch (e) { return; }
@@ -943,6 +1031,7 @@ function loadFromNative() {
     console.log('[init] calling resolveVideo(' + bv + ')');
     resolveVideo(bv).then(function (ok) {
       console.log('[init] resolve returned ok=' + ok + ' demo=' + demo);
+      reportDiag('resolve-done ok=' + ok);
       if (!demo) return;
       el.btnDemo.click();
       waitAndPlay(0);
@@ -955,8 +1044,16 @@ function loadFromNative() {
 }
 
 function waitAndPlay(tries) {
-  if (S.token && S.segs.length > 0 && S.idx < 0) { el.btnToggle.click(); return; }
-  if (tries > 80) { setStatus('err', '自动播放等待超时'); return; }   // ~40s
+  if (S.token && S.segs.length > 0 && S.idx < 0) {
+    console.log('[autoPlay] start token=' + String(S.token).slice(0, 8) + ' segs=' + S.segs.length + ' tries=' + tries);
+    // 直接调用播放函数，不走 btnToggle.click()：
+    // 按钮的 disabled 状态受 updateToggle/时序影响，disabled 时 click() 会被静默忽略，
+    // 导致「点了测试视频但没有任何反应」。
+    jumpTo(0);
+    return;
+  }
+  if (tries > 80) { setStatus('err', '自动播放等待超时'); reportDiag('autoplay-timeout token=' + !!S.token + ' segs=' + S.segs.length + ' idx=' + S.idx); return; }   // ~40s
+  if (tries % 20 === 0) console.log('[autoPlay] wait tries=' + tries + ' token=' + !!S.token + ' segs=' + S.segs.length + ' idx=' + S.idx);
   setTimeout(function () { waitAndPlay(tries + 1); }, 500);
 }
 
@@ -970,12 +1067,26 @@ function applyViewportScale() {
   var natural = 420;
   var w = document.querySelector('#appWrap');
   if (!w) return;
-  if (cssW >= natural - 20) {
-    w.style.transform = '';
-    w.style.webkitTransform = '';
-    document.body.style.minHeight = '';
-    return;
-  }
+if (cssW >= natural - 20) {
+// 视口比设计宽度更宽（平板/折叠屏展开/横屏，CSS px 可达 800~1000）：
+// 不做缩放。此时 CSS 媒体查询(@min-width:700px) 会把 .app 变成两列布局
+// （主列 + 340px 侧栏），这里只清理 inline 残留。
+// 注意：不要在此给 .app 限宽到 ~460px —— 那与两列布局冲突：
+// 460px 装不下「主列 + 340px 侧栏」，flex 会把主列压到 ~78px，
+// 进而 .player-wrap 的 padding-top:56.25% 算出来只有 44px 高，
+// 整个视频区塌陷（真机实测 cssW=813 时 stage 仅 78x44）。
+w.style.transform = '';
+w.style.webkitTransform = '';
+w.style.pointerEvents = '';
+w.style.width = '';
+w.style.maxWidth = '';
+w.style.marginLeft = '';
+w.style.marginRight = '';
+var appEl = document.getElementById('app');
+if (appEl) appEl.style.maxWidth = '';
+document.body.style.minHeight = '';
+return;
+}
   var scale = cssW / natural;
   w.style.transformOrigin = '0 0';
   w.style.webkitTransformOrigin = '0 0';
@@ -1010,5 +1121,8 @@ function applyViewportScale() {
   applyViewportScale();
   window.addEventListener('resize', applyViewportScale);
   requestAnimationFrame(function () { setTimeout(applyViewportScale, 60); });
+// 布局就绪后再报一次诊断：便于在无法截图的设备上确认 stage 尺寸是否正常
+// （曾出现过给 #appWrap 设宽导致 padding-top:56.25% 失效、视频区塌成 38x21 的问题）
+setTimeout(function () { applyViewportScale(); reportDiag('layout-ready'); }, 400);
   loadFromNative();
 })();

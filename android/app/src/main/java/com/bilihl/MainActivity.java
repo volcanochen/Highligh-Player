@@ -104,6 +104,11 @@ public class MainActivity extends Activity {
         //   这个事前端用 #appWrap transform: scale() 自己处理，不在 native 层做。）
         wv.getSettings().setUserAgentString(
                 "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36");
+        // 允许混合内容与 file 访问，确保 http://127.0.0.1 本地服务在所有机型上都能加载
+        wv.getSettings().setMixedContentMode(android.webkit.WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
+        wv.getSettings().setAllowFileAccess(true);
+        // 部分厂商 ROM（含 OPPO/ColorOS）默认禁用 WebView 调试，开启便于真机排障
+        try { android.webkit.WebView.setWebContentsDebuggingEnabled(true); } catch (Throwable ignore) {}
 
         wv.setWebViewClient(new WebViewClient() {
             @Override
@@ -283,15 +288,32 @@ public class MainActivity extends Activity {
     }
 
     /** 从分享文案里抽取标题：优先 EXTRA_SUBJECT，否则取链接前的文字 */
-    private static String extractTitle(String s, String target) {
-        if (s == null) return null;
-        if (target != null && s.contains(target)) {
-            String before = s.substring(0, s.indexOf(target)).trim();
-            before = before.replaceAll("^[\\s【\\[\\(·\\-–—]+", "").replaceAll("[\\s】\\]\\)·\\-–—]+$", "").trim();
-            if (before.length() >= 1 && before.length() <= 50) return before;
-        }
-        return null;
-    }
+private static String extractTitle(String s, String target) {
+if (s == null) return null;
+if (target != null && s.contains(target)) {
+String before = s.substring(0, s.indexOf(target)).trim();
+before = before.replaceAll("^[\\s【\\[\\(·\\-–—]+", "").replaceAll("[\\s】\\]\\)·\\-–—]+$", "").trim();
+if (before.length() >= 1 && before.length() <= 50 && looksLikeTitle(before)) return before;
+}
+return null;
+}
+
+/**
+ * 判断候选文本是否真的像标题。
+ * 必要原因：deep-link（bilibili://video/BVxxx）里 target 前面只剩 "bilibili://video/"，
+ * 原先只按长度判断，会把 scheme 当成标题显示出来。
+ */
+private static boolean looksLikeTitle(String t) {
+// 含协议、域名、斜杠等链接特征 -> 不是标题
+if (t.contains("://") || t.contains("//")) return false;
+if (t.contains("/") || t.contains("www.") || t.contains(".com") || t.contains(".tv")) return false;
+// 纯数字/BV号/av号 -> 不是标题
+if (t.matches("(?i)^(bv[0-9a-z]{10}|av\\d+)$")) return false;
+if (t.matches("^[0-9:\\s]+$")) return false;
+// 全是标点或符号 -> 不是标题
+if (!t.matches(".*[\\p{IsHan}A-Za-z0-9].*")) return false;
+return true;
+}
 
     /** 解析 b23.tv 短链：跟随 302 跳转；返回 200 页面时读 body 找真实链接；失败兜底读当前 loc */
     private static String resolveB23(String url) {
@@ -358,6 +380,8 @@ public class MainActivity extends Activity {
 
     // ---------------------------------------------------------------- JS 桥
     public class BiliBridge {
+        @JavascriptInterface
+        public void diag(String msg) { Log.i("BiliHl-Diag", msg == null ? "" : msg); }
         @JavascriptInterface
         public void toggleFullScreen() {
             runOnUiThread(new Runnable() { public void run() { toggleFull(); } });

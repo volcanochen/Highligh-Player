@@ -17,6 +17,7 @@ import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.URL;
+import java.net.URLDecoder;
 import java.security.MessageDigest;
 import javax.net.ssl.HttpsURLConnection;
 import javax.net.ssl.SSLSocketFactory;
@@ -42,8 +43,11 @@ import java.util.concurrent.TimeUnit;
 public final class BiliApi {
     private static final String TAG = "BiliHl";
 
-    static final String UA = "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 "
-            + "(KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36";
+// 伪装成PC 端 Chrome：B 站 playurl 会据此分配 CDN 节点池，
+// 若伪装移动端会被分到 estgoss/ali 家族节点，这些节点对当前出口 IP 直接返回 403
+// （表现为「视频流加载失败」+ video networkState=3 NO_SOURCE）。
+static final String UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
++ "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
 
     static final long RANGE_CAP = 3L * 1024 * 1024; // 单次回传上限，避免为一个 seek 拖下整个文件
 
@@ -65,35 +69,46 @@ public final class BiliApi {
     // 而 Android 9 的 HttpURLConnection 不会自动回退 IPv4（无 Happy-Eyeballs），
     // 导致每个 API 请求都在 IPv6 上挂满超时 -> 解析极慢。这里自建 SSLSocketFactory，
     // 先把主机解析到 IPv4 地址再建连，SNI/证书校验仍用原始域名，安全且快速。
-    static InetAddress toV4(String host) throws IOException {
-        InetAddress[] all = InetAddress.getAllByName(host);
-        for (InetAddress a : all) if (a instanceof Inet4Address) return a;
-        return InetAddress.getByName(host);
-    }
+static InetAddress toV4(String host) throws IOException {
+InetAddress[] all = InetAddress.getAllByName(host);
+InetAddress firstV4 = null;
+for (InetAddress a : all) {
+if (a instanceof Inet4Address) { if (firstV4 == null) firstV4 = a; }
+}
+if (firstV4 != null) return firstV4;
+// 只有 IPv6 时退回系统默认（此时不做强制，否则会彻底连不上）
+Log.i(TAG, "toV4: " + host + " 无 IPv4 地址，回退系统解析");
+return InetAddress.getByName(host);
+}
 
-    static final SSLSocketFactory FORCE_V4_SF = new SSLSocketFactory() {
-        private final SSLSocketFactory base = (SSLSocketFactory) SSLSocketFactory.getDefault();
-        public String[] getDefaultCipherSuites() { return base.getDefaultCipherSuites(); }
-        public String[] getSupportedCipherSuites() { return base.getSupportedCipherSuites(); }
-        public Socket createSocket() throws IOException { return base.createSocket(); }
-        public Socket createSocket(Socket s, String host, int port, boolean autoClose) throws IOException {
-            return base.createSocket(s, host, port, autoClose);
-        }
-        public Socket createSocket(String host, int port) throws IOException {
-            Socket plain = new Socket();
-            plain.connect(new InetSocketAddress(toV4(host), port), 10000);
-            return base.createSocket(plain, host, port, true);
-        }
-        public Socket createSocket(String host, int port, InetAddress la, int lp) throws IOException {
-            return createSocket(host, port);
-        }
-        public Socket createSocket(InetAddress host, int port) throws IOException {
-            return createSocket(host.getHostAddress(), port);
-        }
-        public Socket createSocket(InetAddress host, int port, InetAddress la, int lp) throws IOException {
-            return createSocket(host.getHostAddress(), port);
-        }
-    };
+static final SSLSocketFactory FORCE_V4_SF = new SSLSocketFactory() {
+private final SSLSocketFactory base = (SSLSocketFactory) SSLSocketFactory.getDefault();
+public String[] getDefaultCipherSuites() { return base.getDefaultCipherSuites(); }
+public String[] getSupportedCipherSuites() { return base.getSupportedCipherSuites(); }
+public Socket createSocket() throws IOException { return base.createSocket(); }
+public Socket createSocket(Socket s, String host, int port, boolean autoClose) throws IOException {
+return base.createSocket(s, host, port, autoClose);
+}
+public Socket createSocket(String host, int port) throws IOException {
+long t0 = System.currentTimeMillis();
+Socket plain = new Socket();
+InetAddress ip = toV4(host);
+plain.connect(new InetSocketAddress(ip, port), 8000);
+Socket tls = base.createSocket(plain, host, port, true);
+Log.i(TAG, "forceV4 connect " + host + " -> " + ip.getHostAddress()
++ " (" + ip.getClass().getSimpleName() + ") in " + (System.currentTimeMillis() - t0) + "ms");
+return tls;
+}
+public Socket createSocket(String host, int port, InetAddress la, int lp) throws IOException {
+return createSocket(host, port);
+}
+public Socket createSocket(InetAddress host, int port) throws IOException {
+return createSocket(host.getHostAddress(), port);
+}
+public Socket createSocket(InetAddress host, int port, InetAddress la, int lp) throws IOException {
+return createSocket(host.getHostAddress(), port);
+}
+};
 
     static void forceV4(HttpURLConnection c) {
         if (c instanceof HttpsURLConnection) ((HttpsURLConnection) c).setSSLSocketFactory(FORCE_V4_SF);
@@ -179,34 +194,81 @@ public final class BiliApi {
     }
 
     /** 视频评论里常见的"时间戳 + 动作" 标记，每条评论只匹配一次 */
-    static JSONArray extractTimestamps(JSONArray replies) throws JSONException {
-        JSONArray out = new JSONArray();
-        if (replies == null) return out;
-        java.util.regex.Pattern[] PATS = new java.util.regex.Pattern[] {
-                java.util.regex.Pattern.compile("(\\d{1,2}:\\d{1,2}(?::\\d{1,2})?)\\s*[~-]\\s*(\\d{1,2}:\\d{1,2}(?::\\d{1,2})?)"),
-                java.util.regex.Pattern.compile("(\\d{1,2}:\\d{1,2}:\\d{1,2})"),
-                java.util.regex.Pattern.compile("(?<![\\d:])([0-5]?\\d:[0-5]\\d)(?!\\d)"),
-        };
-        for (int i = 0; i < replies.length(); i++) {
-            JSONObject r = replies.optJSONObject(i);
-            if (r == null) continue;
-            String text = r.optString("text", "");
-            for (java.util.regex.Pattern p : PATS) {
-                java.util.regex.Matcher m = p.matcher(text);
-                if (m.find()) {
-                    JSONObject hit = new JSONObject();
-                    hit.put("time", m.group(1));
-                    hit.put("end", m.groupCount() > 1 && m.group(2) != null ? m.group(2) : "");
-                    hit.put("user", r.optString("user"));
-                    hit.put("rpid", r.optLong("rpid"));
-                    hit.put("text", text);
-                    out.put(hit);
-                    break;
-                }
-            }
-        }
-        return out;
-    }
+static JSONArray extractTimestamps(JSONArray replies) throws JSONException {
+JSONArray out = new JSONArray();
+if (replies == null) return out;
+// 三种时间戳写法：区间(mm:ss - mm:ss) / 时分秒 / 分:秒
+java.util.regex.Pattern[] PATS = new java.util.regex.Pattern[] {
+java.util.regex.Pattern.compile("(\\d{1,2}:\\d{1,2}(?::\\d{1,2})?)\\s*[~-]\\s*(\\d{1,2}:\\d{1,2}(?::\\d{1,2})?)"),
+java.util.regex.Pattern.compile("(\\d{1,2}:\\d{1,2}:\\d{1,2})"),
+java.util.regex.Pattern.compile("(?<![\\d:])([0-5]?\\d:[0-5]\\d)(?!\\d)"),
+};
+for (int i = 0; i < replies.length(); i++) {
+JSONObject r = replies.optJSONObject(i);
+if (r == null) continue;
+// 兼容 Windows(\r\n)、旧 Mac(\r) 换行：统一成 \n，避免时间戳被\r 粘连或截断
+String text = r.optString("text", "").replace("\r\n", "\n").replace('\r', '\n');
+// 收集该评论里所有时间戳出现位置（start,end,time,endTime），按位置排序
+java.util.List<int[]> spans = new ArrayList<>();
+java.util.List<String> times = new ArrayList<>();
+java.util.List<String> ends = new ArrayList<>();
+for (java.util.regex.Pattern p : PATS) {
+java.util.regex.Matcher m = p.matcher(text);
+while (m.find()) {
+int s = m.start(), e = m.end();
+// 已被更长（更靠前匹配优先）的模式覆盖则跳过，避免 "0:06:48" 与 "06:48" 重复
+boolean covered = false;
+for (int[] sp : spans) if (s >= sp[0] && e <= sp[1]) { covered = true; break; }
+if (covered) continue;
+spans.add(new int[]{s, e});
+times.add(m.group(1));
+ends.add(m.groupCount() > 1 && m.group(2) != null ? m.group(2) : "");
+}
+}
+// 按出现位置排序，保证片段按视频时间顺序排列
+java.util.List<Integer> order = new ArrayList<>();
+for (int k = 0; k < times.size(); k++) order.add(k);
+final java.util.List<int[]> sp2 = spans;
+final java.util.List<String> t2 = times;
+java.util.Collections.sort(order, new java.util.Comparator<Integer>() {
+public int compare(Integer x, Integer y) { return sp2.get(x)[0] - sp2.get(y)[0]; }
+});
+for (int k = 0; k < order.size(); k++) {
+int idx = order.get(k);
+int s = spans.get(idx)[0], e = spans.get(idx)[1];
+// 备注只取「本时间戳 到 下一个时间戳」之间的文字，避免把整条评论（含其它时间戳）灌进文本框
+int noteEnd = (k + 1 < order.size()) ? spans.get(order.get(k + 1))[0] : text.length();
+int from = Math.min(e, text.length());
+int to = Math.max(from, Math.min(noteEnd, text.length()));
+// 若时间戳后紧跟显式时长（如「0:06:48 9s ...」），把该时长提取为 authDur，
+// 并从备注里剔除，避免文本框出现「0:06:48 18s 9s V m」这种重复数值
+int explicitDur = -1;
+int head = from;
+String seg = text.substring(from, to);
+String segTrim = seg.replaceAll("^\\s+", "");   // 先去掉前导空白，否则 ^\\d+ 匹配不到
+java.util.regex.Matcher dm = java.util.regex.Pattern
+.compile("^(\\d+(?:\\.\\d+)?)\\s*(?:s|sec|秒)(?![a-zA-Z])", java.util.regex.Pattern.CASE_INSENSITIVE)
+.matcher(segTrim);
+if (dm.find() && (ends.get(idx) == null || ends.get(idx).isEmpty())) {
+explicitDur = (int) Math.round(Double.parseDouble(dm.group(1)));
+from = Math.min(head + (seg.length() - segTrim.length()) + dm.end(), to);
+}
+String note = text.substring(from, to)
+.replaceAll("[\\r\\n]+", " ").replaceAll("\\s+", " ").trim();
+JSONObject hit = new JSONObject();
+hit.put("time", times.get(idx));
+// 有显式时长时补一个 end，让前端用它作为权威时长（不再靠相邻间隔猜）
+hit.put("end", ends.get(idx) != null && !ends.get(idx).isEmpty() ? ends.get(idx)
+: (explicitDur > 0 ? times.get(idx) + "+" + explicitDur : ""));
+hit.put("dur", explicitDur > 0 ? explicitDur : 0);
+hit.put("user", r.optString("user"));
+hit.put("rpid", r.optLong("rpid"));
+hit.put("text", note);
+out.put(hit);
+}
+}
+return out;
+}
 
     /** token -> 媒体地址表（单用户应用，进程内即可） */
     static final Map<String, MediaEntry> MEDIA = new ConcurrentHashMap<>();
@@ -388,18 +450,34 @@ public final class BiliApi {
         return r;
     }
 
-    static List<String> urlsOf(JSONObject s) {
-        List<String> out = new ArrayList<>();
-        if (s == null) return out;
-        if (!s.isNull("baseUrl")) out.add(s.optString("baseUrl"));
-        if (!s.isNull("base_url")) { String u = s.optString("base_url"); if (!out.contains(u)) out.add(u); }
-        JSONArray bu = s.optJSONArray("backupUrl");
-        if (bu != null) for (int i = 0; i < bu.length(); i++) {
-            String u = bu.optString(i);
-            if (!out.contains(u)) out.add(u);
-        }
-        return out;
-    }
+static List<String> urlsOf(JSONObject s) {
+List<String> out = new ArrayList<>();
+if (s == null) return out;
+if (!s.isNull("baseUrl")) out.add(s.optString("baseUrl"));
+if (!s.isNull("base_url")) { String u = s.optString("base_url"); if (!out.contains(u)) out.add(u); }
+JSONArray bu = s.optJSONArray("backupUrl");
+if (bu != null) for (int i = 0; i < bu.length(); i++) {
+String u = bu.optString(i);
+if (!out.contains(u)) out.add(u);
+}
+// 节点排序：estgoss/ali 家族对部分出口直接 403，放到最后；
+// mcdn / bcache / mirror- 等家族实测可用，排前面，可显著缩短首帧等待。
+List<String> good = new ArrayList<>();
+List<String> risky = new ArrayList<>();
+for (String u : out) {
+String h = hostOf(u);
+if (h.contains("estgoss") || (h.contains("mirrorali") && h.contains("oss"))) risky.add(u);
+else good.add(u);
+}
+List<String> res = new ArrayList<>(good);
+res.addAll(risky);
+return res;
+}
+
+/** 实测受限的 CDN 节点特征（B 站会对这些节点对部分出口返回 403） */
+static boolean isRiskyHost(String host) {
+return host != null && (host.contains("estgoss") || host.contains("mirroralib"));
+}
 
     static String boundedRange(String rng) {
         if (rng == null) return "bytes=0-" + (RANGE_CAP - 1);
@@ -447,18 +525,38 @@ public final class BiliApi {
                 } finally { ms[0] = System.currentTimeMillis() - s; }
             }
         });
-        Future<String> fSpi = POOL.submit(new Callable<String>() {
-            public String call() throws Exception { long s = System.currentTimeMillis(); try { return httpGetString("https://api.bilibili.com/x/frontend/finger/spi", h); } finally { ms[1] = System.currentTimeMillis() - s; } }
-        });
-        Future<String> fNav = POOL.submit(new Callable<String>() {
-            public String call() throws Exception { long s = System.currentTimeMillis(); try { return httpGetString("https://api.bilibili.com/x/web-interface/nav", h); } finally { ms[2] = System.currentTimeMillis() - s; } }
-        });
+Future<String> fSpi = POOL.submit(new Callable<String>() {
+public String call() throws Exception {
+long s = System.currentTimeMillis();
+try { return httpGetString("https://api.bilibili.com/x/frontend/finger/spi", h); }
+catch (Exception e1) {
+Log.w(TAG, "spi fetch failed (" + e1 + "), retry once");
+try { Thread.sleep(300); } catch (Exception ignore) {}
+return httpGetString("https://api.bilibili.com/x/frontend/finger/spi", h);
+}
+finally { ms[1] = System.currentTimeMillis() - s; }
+}
+});
+Future<String> fNav = POOL.submit(new Callable<String>() {
+public String call() throws Exception {
+long s = System.currentTimeMillis();
+try { return httpGetString("https://api.bilibili.com/x/web-interface/nav", h); }
+catch (Exception e1) {
+Log.w(TAG, "nav fetch failed (" + e1 + "), retry once");
+try { Thread.sleep(300); } catch (Exception ignore) {}
+return httpGetString("https://api.bilibili.com/x/web-interface/nav", h);
+}
+finally { ms[2] = System.currentTimeMillis() - s; }
+}
+});
 
-        String viewBody;
-        String spiBody = "";
-        String navBody = "";
-        try { viewBody = fView.get(18, TimeUnit.SECONDS); }
-        catch (Exception e) { throw new RuntimeException("取视频信息失败（网络超时）"); }
+String viewBody;
+String spiBody = "";
+String navBody = "";
+try { viewBody = fView.get(18, TimeUnit.SECONDS); }
+catch (Exception e) {
+throw new RuntimeException("取视频信息失败（网络超时），请检查网络后重试");
+}
         try { spiBody = fSpi.get(15, TimeUnit.SECONDS); } catch (Exception ignore) {}
         try { navBody = fNav.get(15, TimeUnit.SECONDS); } catch (Exception ignore) {}
 
@@ -508,13 +606,17 @@ public final class BiliApi {
             if (!ik.isEmpty() && !sk.isEmpty()) { wbiKey = new String[]{ik, sk}; wbiTs = System.currentTimeMillis(); }
         } catch (Exception ignore) {}
 
-        Map<String, String> q = new LinkedHashMap<>();
-        q.put("bvid", v.getString("bvid"));
-        q.put("cid", String.valueOf(cid));
-        q.put("qn", String.valueOf(qn));
-        q.put("fnver", "0");
-        q.put("fnval", "4048");
-        q.put("fourk", "1");
+Map<String, String> q = new LinkedHashMap<>();
+q.put("bvid", v.getString("bvid"));
+q.put("cid", String.valueOf(cid));
+q.put("qn", String.valueOf(qn));
+q.put("fnver", "0");
+q.put("fnval", "4048");
+q.put("fourk", "1");
+// 仅请求高质量源以获取更完整的 CDN 节点候选。
+// 注意：不能加 platform=html5/otype=json —— 那会让 B 站改走 durl(单文件) 而不返回 dash，
+// 导致「该视频未返回 DASH 流」。节点分配主要取决于 UA 与 high_quality。
+q.put("high_quality", "1");
         String signed = wbiSign(q);
 
         long tp0 = System.currentTimeMillis();
@@ -616,6 +718,7 @@ public final class BiliApi {
 
         String upRange = boundedRange(range);
         for (String url : rotated) {
+            long tm = System.currentTimeMillis();
             try {
                 HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
                 forceV4(c);
@@ -627,7 +730,7 @@ public final class BiliApi {
                 c.setRequestProperty("Accept-Encoding", "identity");
                 if (lastCookie != null && !lastCookie.isEmpty()) c.setRequestProperty("Cookie", lastCookie);
                 c.setRequestProperty("Range", upRange);
-                c.setConnectTimeout(15000);
+                c.setConnectTimeout(8000);
                 c.setReadTimeout(30000);
                 int st = c.getResponseCode();
                 if (st == 200 || st == 206) {
@@ -638,14 +741,86 @@ public final class BiliApi {
                     res.contentLength = c.getContentLength();
                     res.acceptRanges = c.getHeaderField("Accept-Ranges");
                     res.etag = c.getHeaderField("ETag");
+                    Log.i(TAG, "media ok kind=" + kind + " st=" + st + " host=" + hostOf(url)
+                            + " range=" + upRange + " took=" + (System.currentTimeMillis() - tm) + "ms");
                     return res;
                 }
+// 非 200/206（如403防盗链/404）必须记录，否则整条链路是黑盒
+Log.w(TAG, "media upstream HTTP " + st + " kind=" + kind + " host=" + hostOf(url)
++ " range=" + upRange + " ctype=" + c.getContentType()
++ " msg=" + readErr(c) + " url=" + redact(url)
++ " took=" + (System.currentTimeMillis() - tm) + "ms");
                 c.disconnect();
             } catch (Exception ex) {
-                Log.w(TAG, "media upstream failed: " + ex.getMessage());
+                Log.w(TAG, "media upstream failed kind=" + kind + " host=" + hostOf(url)
+                        + " range=" + upRange + " err=" + ex.getClass().getSimpleName() + ": " + ex.getMessage()
+                        + " took=" + (System.currentTimeMillis() - tm) + "ms");
             }
         }
         res.status = 502;
         return res;
+    }
+
+static String hostOf(String url) {
+try { return new URL(url).getHost(); } catch (Exception e) { return "?"; }
+}
+
+/** 打印媒体 URL 时把签名类参数打码，避免日志泄露过期签名 */
+static String redact(String url) {
+try {
+java.net.URL u = new URL(url);
+StringBuilder sb = new StringBuilder();
+sb.append(u.getProtocol()).append("://").append(u.getHost()).append(u.getPath()).append("?");
+java.util.Map<String, String[]> q = u.getQuery() != null
+? parseQueryMap(u.getQuery()) : new java.util.HashMap<>();
+boolean first = true;
+for (java.util.Map.Entry<String, String[]> e : new java.util.TreeMap<>(q).entrySet()) {
+if (!first) sb.append("&");
+first = false;
+String k = e.getKey();
+String v = e.getValue() != null && e.getValue().length > 0 ? e.getValue()[0] : "";
+// 签名/令牌类参数只保留长度，避免日志泄露
+if (k.equals("sign") || k.equals("token") || k.equals("access_key_id") || k.equals("hdnts")
+|| k.equals("expires") || k.equals("e") || k.equals("oi") || k.equals("platform")
+|| k.equals("upsig") || k.equals("uparams") || k.equals("uipk") || k.equals("trid")) {
+sb.append(k).append("=").append(v.length() > 8 ? v.substring(0, 6) + "***" : "***");
+} else {
+sb.append(k).append("=").append(v);
+}
+}
+return sb.toString();
+} catch (Exception e) {
+return url;
+}
+}
+
+static java.util.Map<String, String[]> parseQueryMap(String qs) {
+java.util.Map<String, String[]> m = new java.util.LinkedHashMap<>();
+if (qs == null || qs.isEmpty()) return m;
+for (String pair : qs.split("&")) {
+int eq = pair.indexOf('=');
+String k, v;
+try {
+if (eq < 0) { k = URLDecoder.decode(pair, "UTF-8"); v = ""; }
+else { k = URLDecoder.decode(pair.substring(0, eq), "UTF-8"); v = URLDecoder.decode(pair.substring(eq + 1), "UTF-8"); }
+} catch (Exception e) { continue; }
+m.put(k, new String[]{v});
+}
+return m;
+}
+
+    static String readErr(HttpURLConnection c) {
+        try {
+            java.io.InputStream es = c.getErrorStream();
+            if (es == null) return "";
+            java.io.ByteArrayOutputStream bo = new java.io.ByteArrayOutputStream();
+            byte[] b = new byte[512];
+            int n;
+            while ((n = es.read(b)) > 0 && bo.size() < 400) bo.write(b, 0, n);
+            es.close();
+            return new String(bo.toByteArray(), "UTF-8").replaceAll("\\s+", " ");
+        } catch (Exception e) {
+            return "";
+        }
     }
 }
