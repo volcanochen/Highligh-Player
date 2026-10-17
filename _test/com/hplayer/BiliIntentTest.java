@@ -1,4 +1,4 @@
-package com.bilihl;
+package com.hplayer;
 
 public class BiliIntentTest {
     static int pass = 0, fail = 0;

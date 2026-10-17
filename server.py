@@ -284,7 +284,7 @@ class QuietServer(ThreadingHTTPServer):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "BiliHighlight/1.0"
+    server_version = "H-Player/1.0"
 
     def log_message(self, fmt, *args):
         if "/api/media/" not in self.path:

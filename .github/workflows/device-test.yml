@@ -53,10 +53,10 @@ jobs:
           mkdir -p _test/out
           "$JBR/bin/javac.exe" -encoding UTF-8 -nowarn \
             -cp "$SDK/platforms/android-34/android.jar;android/build/classes" \
-            -d _test/out _test/com/bilihl/BiliIntentTest.java
+            -d _test/out _test/com/hplayer/BiliIntentTest.java
           "$JBR/bin/java.exe" \
             -cp "$SDK/platforms/android-34/android.jar;android/build/classes;_test/out" \
-            com.bilihl.BiliIntentTest
+            com.hplayer.BiliIntentTest
 
       - name: 双机真机测试
         run: python _test/run_suite.py

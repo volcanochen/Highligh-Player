@@ -41,7 +41,7 @@ python _test/cdp_eval.py -c "S.idx"          # 临时在真机页面里执行 JS
 | `cases.py` | 分特性测试用例（新增特性就往 `CASES` 注册表里加一条） |
 | `run_suite.py` | 调度、结果模型、Markdown 报告生成、退出码 |
 | `cdp_eval.py` | 命令行版 CDP 求值（调试单个表达式时用） |
-| `com/bilihl/BiliIntentTest.java` | JVM 单元测试：链接/标题解析 |
+| `com/hplayer/BiliIntentTest.java` | JVM 单元测试：链接/标题解析 |
 | `last_result.json` | 最近一次结果（供 `--report-only` 复用） |
 
 ## 环境要求
@@ -138,11 +138,11 @@ CDP socket 约 15 秒超时，所以长时间观察要「埋点 + 短命令轮�
 日志过滤：
 
 ```bash
-adb -s <serial> logcat -s BiliHl:V BiliHl-JS:V BiliHl-Diag:V BiliHl-Share:V
+adb -s <serial> logcat -s HPlayer:V HPlayer-JS:V HPlayer-Diag:V HPlayer-Share:V
 ```
 
-- `BiliHl-JS` 是 console 转发（`WebChromeClient.onConsoleMessage`），页面里的报错都在这
-- `BiliHl-Diag` 是前端主动上报的诊断信息（布局尺寸、播放状态等）
+- `HPlayer-JS` 是 console 转发（`WebChromeClient.onConsoleMessage`），页面里的报错都在这
+- `HPlayer-Diag` 是前端主动上报的诊断信息（布局尺寸、播放状态等）
 
 ## Android 环境备忘（本项目实测）
 

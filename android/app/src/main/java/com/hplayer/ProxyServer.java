@@ -1,4 +1,4 @@
-package com.bilihl;
+package com.hplayer;
 
 import android.content.Context;
 import android.util.Log;
@@ -33,7 +33,7 @@ import java.util.concurrent.Executors;
  * Activity 重建后仍复用同一个端口 → localStorage / 服务端 token 都保持，续播才有意义。
  */
 public class ProxyServer extends Thread {
-    private static final String TAG = "BiliHl";
+    private static final String TAG = "HPlayer";
     private static volatile ProxyServer INSTANCE = null;
 
     private final Context ctx;

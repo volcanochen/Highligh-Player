@@ -940,7 +940,7 @@ function reparse() {
 }
 
 /* ---------------------- 记忆播放（续播） ---------------------- */
-function posKey() { return S.info && S.info.bvid ? ('bilihl_pos_' + S.info.bvid) : null; }
+function posKey() { return S.info && S.info.bvid ? ('hplayer_pos_' + S.info.bvid) : null; }
 function savePos() {
   // 暂停时也要落盘：Activity 被回收/折叠重建后正要靠这份数据续播，
   // 若这里因为 !S.playing 直接返回，重建后就只能从头播。
@@ -1026,7 +1026,7 @@ function toggleSide(force) {
 }
 function setSideMode(mode) {
   S.sideMode = (mode === 'float') ? 'float' : 'inline';
-  safeSet('bilihl_side_mode', S.sideMode);
+  safeSet('hplayer_side_mode', S.sideMode);
   applySideMode();
   BiliBridgeToast(S.sideMode === 'float' ? '片段面板：右侧浮窗' : '片段面板：内嵌');
 }
@@ -1537,7 +1537,7 @@ return;
     console.error('[unhandled rejection] ' + ((e.reason && (e.reason.message || e.reason)) || e.reason));
   });
   // 侧栏形态沿用上次选择；默认收起（画面优先）
-  var sm = safeGet('bilihl_side_mode');
+  var sm = safeGet('hplayer_side_mode');
   if (sm === 'float' || sm === 'inline') S.sideMode = sm;
   applySideMode();
   switchTab('segs');

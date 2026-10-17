@@ -30,9 +30,9 @@ from collections import deque
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-PKG = "com.bilihl"
-ACT = "com.bilihl/.MainActivity"
-APK = os.path.join(ROOT, "android", "bili-highlight.apk")
+PKG = "com.hplayer"
+ACT = "com.hplayer/.MainActivity"
+APK = os.path.join(ROOT, "android", "H-Player.apk")
 
 DEFAULT_ADB = "C:/Users/volcano/AppData/Local/Android/Sdk/platform-tools/adb.exe"
 
@@ -306,7 +306,7 @@ class Logcat(object):
 
     def find_crash(self):
         out = self._run(["logcat", "-d", "-v", "brief", "-b", "crash"], timeout=30)
-        return out if ("com.bilihl" in out) else ""
+        return out if ("com.hplayer" in out) else ""
 
 
 # --------------------------------------------------------------------------
@@ -341,8 +341,8 @@ class Device(object):
         self.abi = ""
         self.cdp = Cdp(port)
         self.log = Logcat(self.adb, serial, [
-            "BiliHl:V", "BiliHl-Share:V", "BiliHl-JS:V", "BiliHl-Diag:V",
-            "BiliHl-Screen:V", "BiliApi:V", "chromium:V", "AndroidRuntime:E",
+            "HPlayer:V", "HPlayer-Share:V", "HPlayer-JS:V", "HPlayer-Diag:V",
+            "HPlayer-Screen:V", "chromium:V", "AndroidRuntime:E",
         ])
         self._forwarded = False
         self.offline = False

@@ -1,4 +1,4 @@
-# B站集锦播放器 (Highligh-Player)
+# H-Player
 
 把 B 站视频里的「集锦时间戳」（评论区常见的 `0:04:02 17s 动作名` 之类）变成一段**连续播放的高光集锦**。
 从 B 站分享一个视频过来，自动扫评论里的时间戳，拼成一条时间轴，无缝连播。
@@ -28,7 +28,7 @@
 ├── server.py               # 桌面开发服务器（本地 HTTP + /api/resolve /api/replies /api/media 代理）
 ├── start.cmd               # Windows 一键起桌面版
 ├── android/                # Android 应用（内置同源本地服务，WebView 加载前端）
-│   ├── app/src/main/java/com/bilihl/
+│   ├── app/src/main/java/com/hplayer/
 │   │   ├── MainActivity.java   # 分享/深链解析、WebView、密度与视口处理
 │   │   ├── ProxyServer.java    # 本机 HTTP 服务（静态托管 + API 代理）
 │   │   └── BiliApi.java        # view → wbi 签名 → playurl 取流，评论抓取
@@ -49,7 +49,7 @@ bash android/build_apk.sh      # Git Bash / Linux / macOS
 流程：`aapt2 compile/link → javac → d8 → 合并 dex+assets → zipalign → apksigner`。
 首次构建会在 `android/keystore.jks` 自动生成一个自签名 keystore（**该文件已被 .gitignore 排除，请勿提交**）。
 
-产物：`android/bili-highlight.apk`。
+产物：`android/H-Player.apk`。
 
 ## 运行桌面版（调试前端）
 

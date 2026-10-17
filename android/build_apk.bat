@@ -11,7 +11,7 @@ set "PATH=%JBR%\bin;%BT%;%PATH%"
 set "APP=%ROOT%app\src\main"
 set "BUILD=%ROOT%build"
 set "WWW=%APP%\assets\www"
-set "SRC=%APP%\java\com\bilihl"
+set "SRC=%APP%\java\com\hplayer"
 set "STATIC=%ROOT%..\static"
 
 if not exist "%BUILD%" mkdir "%BUILD%"
@@ -36,7 +36,7 @@ aapt2 link -o "%BUILD%\apk\base.apk" -I "%PLAT%\android.jar" ^
 
 echo [4/8] javac 编译
 javac -source 1.8 -target 1.8 -cp "%PLAT%\android.jar" -d "%BUILD%\classes" ^
-  "%SRC%\*.java" "%BUILD%\gen_R\com\bilihl\R.java" || goto :err
+  "%SRC%\*.java" "%BUILD%\gen_R\com\hplayer\R.java" || goto :err
 
 echo [5/8] d8 生成 classes.dex
 d8 --release --min-api 24 --output "%BUILD%\classes.dex" "%BUILD%\classes" || goto :err
@@ -56,11 +56,11 @@ if not exist "%ROOT%keystore.jks" (
 )
 apksigner sign --ks "%ROOT%keystore.jks" --ks-key-alias bilihl ^
   --ks-pass pass:bilihl123 --key-pass pass:bilihl123 ^
-  --out "%ROOT%bili-highlight.apk" "%BUILD%\apk\aligned.apk" || goto :err
+  --out "%ROOT%H-Player.apk" "%BUILD%\apk\aligned.apk" || goto :err
 
 echo.
 echo ========== BUILD OK ==========
-echo APK: %ROOT%bili-highlight.apk
+echo APK: %ROOT%H-Player.apk
 goto :eof
 
 :err

@@ -1,4 +1,4 @@
-package com.bilihl;
+package com.hplayer;
 
 import android.util.Log;
 
@@ -42,7 +42,7 @@ import java.util.concurrent.TimeoutException;
  * 不依赖任何第三方包（org.json 为 Android 内置）。
  */
 public final class BiliApi {
-    private static final String TAG = "BiliHl";
+    private static final String TAG = "HPlayer";
 
 // 伪装成PC 端 Chrome：B 站 playurl 会据此分配 CDN 节点池，
 // 若伪装移动端会被分到 estgoss/ali 家族节点，这些节点对当前出口 IP 直接返回 403

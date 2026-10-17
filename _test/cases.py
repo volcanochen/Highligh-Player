@@ -49,7 +49,7 @@ SNAP = r"""JSON.stringify({
              err: (d.v.error ? d.v.error.code : -1) };
   }),
   active: S.active,
-  pos: (function () { try { return localStorage.getItem('bilihl_pos_' + ((S.info && S.info.bvid) || '')); } catch (e) { return null; } })()
+  pos: (function () { try { return localStorage.getItem('hplayer_pos_' + ((S.info && S.info.bvid) || '')); } catch (e) { return null; } })()
 })"""
 
 
@@ -153,8 +153,8 @@ def c_app_launch(d):
     """特性：应用启动与本地服务可用"""
     r = CaseResult("应用启动 + 本地服务监听", "启动")
     # 冷启动：runner 安装 APK 后进程并不保证在跑，先确保应用起来
-    if not d.sh("pidof", "com.bilihl").strip():
-        d.sh("monkey", "-p", "com.bilihl", "-c", "android.intent.category.LAUNCHER", "1")
+    if not d.sh("pidof", "com.hplayer").strip():
+        d.sh("monkey", "-p", "com.hplayer", "-c", "android.intent.category.LAUNCHER", "1")
         time.sleep(8)
     if not d.wait_page(timeout=35):
         return r.fail("WebView 调试通道连不上（应用可能没起来或没开调试）")
@@ -170,7 +170,7 @@ def c_resolve_cold(d):
     r = CaseResult("冷启动首次解析不超时", "解析")
     d.force_stop()
     time.sleep(2)
-    d.sh("monkey", "-p", "com.bilihl", "-c", "android.intent.category.LAUNCHER", "1")
+    d.sh("monkey", "-p", "com.hplayer", "-c", "android.intent.category.LAUNCHER", "1")
     time.sleep(7)
     if not d.wait_page(timeout=30):
         return r.fail("冷启动后 WebView 不可达")
@@ -227,13 +227,13 @@ def c_resolve_concurrent(d):
 def c_deeplink_share(d):
     """特性：从 B 站链接打开（ACTION_VIEW 深链）"""
     r = CaseResult("深链打开并自动解析", "分享")
-    d.sh("am", "force-stop", "com.bilihl")
+    d.sh("am", "force-stop", "com.hplayer")
     time.sleep(1)
     # 深链的解析日志在「本次冷启动」里，而常驻 logcat 是在安装后启动的，
     # 中间这次 force-stop 不会丢日志，但为稳妥起见先重启一次读取器。
     d.log.clear()
     d.log.start()
-    d.sh("monkey", "-p", "com.bilihl", "-c", "android.intent.category.LAUNCHER", "1")
+    d.sh("monkey", "-p", "com.hplayer", "-c", "android.intent.category.LAUNCHER", "1")
     time.sleep(5)
     d.open_url(TEST_URL)
     if not d.wait_page(timeout=35):
@@ -245,7 +245,7 @@ def c_deeplink_share(d):
     if s.get("bv") != TEST_BV:
         return r.fail("解析到了错误的视频：%s（期望 %s）" % (s.get("bv"), TEST_BV))
     # 从 logcat 全量缓冲里找链接提取日志（不能只看常驻读取器，可能错过启动瞬间）
-    dump = d.log.dump() + "\n" + d.log._run(["logcat", "-d", "-v", "brief", "-s", "BiliHl-Share"])
+    dump = d.log.dump() + "\n" + d.log._run(["logcat", "-d", "-v", "brief", "-s", "HPlayer-Share"])
     if "target=" not in dump:
         return r.fail("分享解析日志里没有 target，可能没走到链接提取分支")
     return r.ok("解析到 %s，时长 %ss" % (s.get("bv"), s.get("dur")),
@@ -518,7 +518,7 @@ def c_resume_memory(d):
     time.sleep(2.5)
     d.cdp.js("savePosNow(); 'saved'", timeout=10)
     time.sleep(0.6)
-    out = d.cdp.js("JSON.stringify(localStorage.getItem('bilihl_pos_' + (S.info && S.info.bvid)))")
+    out = d.cdp.js("JSON.stringify(localStorage.getItem('hplayer_pos_' + (S.info && S.info.bvid)))")
     if not out:
         return r.fail("localStorage 里没有落盘位置")
     raw = out.strip('"')  # CDP 会把值再包一层 JSON 字符串
@@ -615,9 +615,9 @@ def c_no_js_error(d):
     for pat in (r"Uncaught", r"TypeError", r"ReferenceError", r"is not a function",
                 r"is not defined", r"SyntaxError"):
         bad += d.log.grep(pat)
-    bad = [b for b in bad if "BiliHl" in b]
+    bad = [b for b in bad if "HPlayer" in b]
     if bad:
-        uniq = sorted(set(b.split("BiliHl-JS:")[-1].strip()[:110] for b in bad))
+        uniq = sorted(set(b.split("HPlayer-JS:")[-1].strip()[:110] for b in bad))
         return r.fail("发现 %d 条 JS 错误：%s" % (len(bad), " | ".join(uniq[:3])),
                       errors=uniq[:5])
     return r.ok("日志中无 JS 异常")
@@ -627,10 +627,10 @@ def c_no_crash(d):
     """特性：应用无崩溃"""
     r = CaseResult("应用无崩溃", "稳定性")
     crash = d.log.find_crash()
-    if crash and "com.bilihl" in crash:
-        head = [l for l in crash.splitlines() if "com.bilihl" in l][:3]
+    if crash and "com.hplayer" in crash:
+        head = [l for l in crash.splitlines() if "com.hplayer" in l][:3]
         return r.fail("崩溃日志：%s" % " | ".join(head))
-    alive = bool(d.sh("pidof", "com.bilihl").strip())
+    alive = bool(d.sh("pidof", "com.hplayer").strip())
     if not alive:
         return r.fail("进程已不在（可能被系统杀掉或崩溃）")
     return r.ok("进程存活，无 crash 记录")

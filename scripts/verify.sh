@@ -35,7 +35,7 @@ done
 hr() { printf '%s\n' "------------------------------------------------------------------------"; }
 
 hr
-echo "  B站集锦播放器 · 验收门禁"
+echo "  H-Player · 验收门禁"
 hr
 
 # ---------------------------------------------------------------- 1. 构建
@@ -52,14 +52,14 @@ echo "[2/3] JVM 单元测试（链接/标题解析）"
 SDK="C:/Users/volcano/AppData/Local/Android/Sdk"
 JBR="C:/Program Files/Android/Android Studio/jbr"
 UNIT_OK=1
-if [ -f "_test/com/bilihl/BiliIntentTest.java" ]; then
+if [ -f "_test/com/hplayer/BiliIntentTest.java" ]; then
   ( cd "$ROOT" \
     && MSYS2_ARG_CONV_EXCL="*" "$JBR/bin/javac.exe" -encoding UTF-8 -nowarn \
          -cp "$SDK/platforms/android-34/android.jar;android/build/classes" \
-         -d _test/out _test/com/bilihl/BiliIntentTest.java \
+         -d _test/out _test/com/hplayer/BiliIntentTest.java \
     && "$JBR/bin/java.exe" \
          -cp "$SDK/platforms/android-34/android.jar;android/build/classes;_test/out" \
-         com.bilihl.BiliIntentTest )
+         com.hplayer.BiliIntentTest )
   if [ $? -ne 0 ]; then
     echo "!! 单元测试未通过"
     UNIT_OK=0

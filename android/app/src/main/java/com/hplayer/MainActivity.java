@@ -1,6 +1,6 @@
-package com.bilihl;
+package com.hplayer;
 
-import com.bilihl.R;
+import com.hplayer.R;
 
 import android.app.Activity;
 import android.content.ClipData;
@@ -61,7 +61,7 @@ public class MainActivity extends Activity {
             Resources res = base.getResources();
             Configuration cfg = res.getConfiguration();
             if (cfg.densityDpi > ABNORMAL_DPI_THRESHOLD) {
-                Log.i("BiliHl", "density 异常(" + cfg.densityDpi + ") → 钳制到 " + NATURAL_DPI);
+                Log.i("HPlayer", "density 异常(" + cfg.densityDpi + ") → 钳制到 " + NATURAL_DPI);
                 cfg.densityDpi = NATURAL_DPI;
                 DisplayMetrics dm = res.getDisplayMetrics();
                 dm.densityDpi = NATURAL_DPI;
@@ -70,9 +70,9 @@ public class MainActivity extends Activity {
                 // updateConfiguration 在 API 25 起被标记 deprecated，但仍生效
                 res.updateConfiguration(cfg, dm);
             } else {
-                Log.i("BiliHl", "density 正常，保持系统值 " + cfg.densityDpi);
+                Log.i("HPlayer", "density 正常，保持系统值 " + cfg.densityDpi);
             }
-        } catch (Exception e) { Log.w("BiliHl", "attachBaseContext density fix: " + e); }
+        } catch (Exception e) { Log.w("HPlayer", "attachBaseContext density fix: " + e); }
     }
 
     // 【网络选择交给系统】曾经在这里强制 java.net.preferIPv4Stack=true，
@@ -155,14 +155,14 @@ public class MainActivity extends Activity {
                 // 页面就绪后才让 evalJs 真正执行，并补发冷启动期间暂存的调用
                 // （分享兜底弹窗、全屏切换、续播定位都依赖这条）
                 flushPendingJs();
-                Log.i("BiliHl", "onPageFinished: " + url);
+                Log.i("HPlayer", "onPageFinished: " + url);
             }
         });
-        // 把前端 console.log/error 转到 logcat， tag=BiliHl-JS，方便真机排查
+        // 把前端 console.log/error 转到 logcat， tag=HPlayer-JS，方便真机排查
         wv.setWebChromeClient(new WebChromeClient() {
             @Override
             public boolean onConsoleMessage(android.webkit.ConsoleMessage m) {
-                Log.i("BiliHl-JS", m.message() + " @" + m.sourceId() + ":" + m.lineNumber());
+                Log.i("HPlayer-JS", m.message() + " @" + m.sourceId() + ":" + m.lineNumber());
                 return true;
             }
         });
@@ -186,7 +186,7 @@ public class MainActivity extends Activity {
             handleIntent(getIntent());
             loadPlayer();
         }
-        Log.i("BiliHl", "onCreate done: baseUrl=" + baseUrl + " pendingBv=" + pendingBv
+        Log.i("HPlayer", "onCreate done: baseUrl=" + baseUrl + " pendingBv=" + pendingBv
                 + " restored=" + restored + " resumeIdx=" + resumeIdx);
     }
 
@@ -212,7 +212,7 @@ public class MainActivity extends Activity {
         configChanging = true;
         int w = getResources().getConfiguration().screenWidthDp;
         int h = getResources().getConfiguration().screenHeightDp;
-        Log.i("BiliHl", "onConfigurationChanged: " + w + "x" + h + "dp"
+        Log.i("HPlayer", "onConfigurationChanged: " + w + "x" + h + "dp"
                 + " smallestW=" + newConfig.smallestScreenWidthDp
                 + " density=" + newConfig.densityDpi
                 + " orientation=" + newConfig.orientation);
@@ -239,7 +239,7 @@ public class MainActivity extends Activity {
         out.putString("k_title", sharedTitle);
         out.putInt("k_idx", lastIdx);
         out.putDouble("k_t", lastT);
-        Log.i("BiliHl", "onSaveInstanceState: bv=" + pendingBv + " idx=" + lastIdx + " t=" + lastT);
+        Log.i("HPlayer", "onSaveInstanceState: bv=" + pendingBv + " idx=" + lastIdx + " t=" + lastT);
     }
 
     /** 进程内缓存的播放位置，由前端通过 BiliBridge.reportPos 主动推上来 */
@@ -415,7 +415,7 @@ public class MainActivity extends Activity {
     private void handleIntent(Intent it) {
         if (it == null) return;
         String a = it.getAction();
-        Log.i("BiliHl-Share", "action=" + a + " type=" + it.getType()
+        Log.i("HPlayer-Share", "action=" + a + " type=" + it.getType()
                 + " data=" + (it.getData() == null ? null : it.getData().toString())
                 + " display=" + getDisplayIdSafe());
 
@@ -479,7 +479,7 @@ public class MainActivity extends Activity {
                     if (v instanceof String) texts.add((String) v);
                     else if (v instanceof CharSequence) texts.add(v.toString());
                 }
-                Log.i("BiliHl-Share", "extras keys=" + eb.keySet());
+                Log.i("HPlayer-Share", "extras keys=" + eb.keySet());
             }
         } catch (Exception ignore) {}
 
@@ -493,7 +493,7 @@ public class MainActivity extends Activity {
             mb.append(uniq.get(i));
         }
         String merged = mb.toString();
-        Log.i("BiliHl-Share", "candidates=" + uniq.size() + " merged=" + merged.replace("\n", " | "));
+        Log.i("HPlayer-Share", "candidates=" + uniq.size() + " merged=" + merged.replace("\n", " | "));
 
         if (subject != null && !subject.isEmpty()) sharedTitle = subject;
         String target = null;
@@ -511,7 +511,7 @@ public class MainActivity extends Activity {
         }
 
         if (target == null) {
-            Log.w("BiliHl-Share", "no bilibili target found in payload: " + merged);
+            Log.w("HPlayer-Share", "no bilibili target found in payload: " + merged);
             // 关键：原来这里只写日志就 return，用户看到的是"什么都没发生"，
             // 完全无法判断是链接没传过来还是解析失败。现在把原始负载回传给页面显示，
             // 并给一个手动粘贴框兜底（外屏分享场景下系统可能根本不给链接）。
@@ -526,11 +526,11 @@ public class MainActivity extends Activity {
                 evalJs("showShareFallback && showShareFallback(" + jsQuote(rawForUser) + ");");
                 Toast.makeText(this, "没识别到 B 站链接，可在页面里粘贴", Toast.LENGTH_LONG).show();
             } else {
-                Log.i("BiliHl-Share", "MAIN 启动且无链接，属正常，不提示");
+                Log.i("HPlayer-Share", "MAIN 启动且无链接，属正常，不提示");
             }
             return;
         }
-        Log.i("BiliHl-Share", "target=" + target + " title=" + sharedTitle);
+        Log.i("HPlayer-Share", "target=" + target + " title=" + sharedTitle);
 
         if (target.startsWith("b23tv:")) {
             // "b23tv:" 前缀为 6 个字符，必须截掉 6 个，否则会残留 ':' 导致 URL 非法
@@ -603,7 +603,7 @@ return true;
             c.connect();
             int code = c.getResponseCode();
             loc = c.getURL().toString();
-            Log.i("BiliHl-Share", "b23 code=" + code + " loc=" + loc);
+            Log.i("HPlayer-Share", "b23 code=" + code + " loc=" + loc);
             if (loc != null && loc.indexOf("b23.tv") >= 0) {
                 // 没跳走（返回 200 页面），读 body 找真实链接
                 java.io.InputStream is = c.getInputStream();
@@ -623,7 +623,7 @@ return true;
             c.disconnect();
             return loc;
         } catch (Exception e) {
-            Log.w("BiliHl-Share", "resolveB23 err: " + e.getMessage());
+            Log.w("HPlayer-Share", "resolveB23 err: " + e.getMessage());
             if (c != null) try { c.disconnect(); } catch (Exception ignore) {}
             return loc;
         }
@@ -668,7 +668,7 @@ return true;
     // ---------------------------------------------------------------- JS 桥
     public class BiliBridge {
         @JavascriptInterface
-        public void diag(String msg) { Log.i("BiliHl-Diag", msg == null ? "" : msg); }
+        public void diag(String msg) { Log.i("HPlayer-Diag", msg == null ? "" : msg); }
         @JavascriptInterface
         public void toggleFullScreen() {
             runOnUiThread(new Runnable() { public void run() { toggleFull(); } });
@@ -714,7 +714,7 @@ return true;
         /** 折叠/旋转后前端重新量完布局会回调一次，用于在 logcat 确认新屏幕下的排版 */
         @JavascriptInterface
         public void reportScreen(String tag) {
-            Log.i("BiliHl-Screen", tag);
+            Log.i("HPlayer-Screen", tag);
         }
     }
 }

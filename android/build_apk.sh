@@ -17,13 +17,13 @@ PY="C:/Users/volcano/.workbuddy/binaries/python/versions/3.13.12/python.exe"
 APP="$ROOT/app/src/main"
 BUILD="$ROOT/build"
 WWW="$APP/assets/www"
-SRC="$APP/java/com/bilihl"
+SRC="$APP/java/com/hplayer"
 STATIC="$ROOT/../static"
 
 mkdir -p "$BUILD/gen" "$BUILD/apk" "$BUILD/classes" "$BUILD/gen_R" "$BUILD/dex" "$WWW"
 rm -rf "$BUILD/dex"
 mkdir -p "$BUILD/dex"
-rm -f "$BUILD/apk/base.apk" "$BUILD/apk/unsigned.apk" "$BUILD/apk/aligned.apk" "$ROOT/bili-highlight.apk"
+rm -f "$BUILD/apk/base.apk" "$BUILD/apk/unsigned.apk" "$BUILD/apk/aligned.apk" "$ROOT/bili-highlight.apk" "$ROOT/H-Player.apk"
 
 echo "[1/8] 复制前端静态文件"
 cp -f "$STATIC/index.html" "$WWW/index.html"
@@ -40,7 +40,7 @@ echo "[3/8] aapt2 link 资源 + 生成 R.java"
 
 echo "[4/8] javac 编译"
 "$JAVAC" -encoding UTF-8 -source 1.8 -target 1.8 -cp "$PLAT/android.jar" -d "$BUILD/classes" \
-  "$SRC"/*.java "$BUILD/gen_R/com/bilihl/R.java"
+  "$SRC"/*.java "$BUILD/gen_R/com/hplayer/R.java"
 
 echo "[5/8] d8 生成 classes.dex"
 "$JBR/bin/jar.exe" cf "$BUILD/classes.jar" -C "$BUILD/classes" .
@@ -61,8 +61,8 @@ if [ ! -f "$ROOT/keystore.jks" ]; then
 fi
 "$JAVA" -cp "$BT/lib/*" com.android.apksigner.ApkSignerTool sign --ks "$ROOT/keystore.jks" --ks-key-alias bilihl \
   --ks-pass pass:bilihl123 --key-pass pass:bilihl123 \
-  --out "$ROOT/bili-highlight.apk" "$BUILD/apk/aligned.apk"
+  --out "$ROOT/H-Player.apk" "$BUILD/apk/aligned.apk"
 
 echo
 echo "========== BUILD OK =========="
-echo "APK: $ROOT/bili-highlight.apk"
+echo "APK: $ROOT/H-Player.apk"
