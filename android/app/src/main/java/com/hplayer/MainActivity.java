@@ -7,6 +7,8 @@ import android.content.ClipData;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ActivityInfo;
+import android.content.pm.PackageInfo;
+import android.content.pm.PackageManager;
 import android.content.res.Configuration;
 import android.content.res.Resources;
 import android.os.Bundle;
@@ -86,6 +88,7 @@ public class MainActivity extends Activity {
     private Button btnBack, btnTest, btnFull;
     private LinearLayout topbar;
     private ProxyServer server;
+    private UpdateChecker updater;
     private String baseUrl;
     private String pendingBv = null;
     private boolean full = false;
@@ -171,6 +174,34 @@ public class MainActivity extends Activity {
 
         server = ProxyServer.get(this);
         baseUrl = server.baseUrl;
+        // 软件更新：从 GitHub Releases 取最新 APK
+        updater = new UpdateChecker(this, new UpdateChecker.UpdateListener() {
+            @Override
+            public void onChecked(boolean hasUpdate, String curVersion, String latestVersion,
+                                 String latestName, String notes, boolean apkAvailable) {
+                StringBuilder sb = new StringBuilder("{");
+                sb.append("\"hasUpdate\":").append(hasUpdate ? "true" : "false");
+                sb.append(",\"curVersion\":").append(jsonStr(curVersion));
+                sb.append(",\"latestVersion\":").append(jsonStr(latestVersion));
+                sb.append(",\"latestName\":").append(jsonStr(latestName));
+                sb.append(",\"notes\":").append(jsonStr(notes));
+                sb.append(",\"apkAvailable\":").append(apkAvailable ? "true" : "false");
+                sb.append("}");
+                evalJs("onUpdateChecked(" + sb + ")");
+            }
+            @Override
+            public void onProgress(int pct) {
+                evalJs("onUpdateProgress(" + pct + ")");
+            }
+            @Override
+            public void onError(String msg) {
+                evalJs("onUpdateError(" + jsonStr(msg) + ")");
+            }
+            @Override
+            public void onInstallStarted() {
+                evalJs("onUpdateInstalled()");
+            }
+        });
         // 预热 B 站接口连接：省掉冷启动后第一次解析的 DNS+TCP+TLS 握手时间
         // （蜂窝网下这一步能让首次解析从 30~40s 降到秒级）。失败无害。
         BiliApi.warmUp();
@@ -338,6 +369,26 @@ public class MainActivity extends Activity {
      * 否则「分享读不到链接 → 弹兜底框」这条链路在冷启动时必然失效
      * （onCreate 里 handleIntent 早于 WebView 首次加载完成）。
      */
+    private static String jsonStr(String s) {
+        if (s == null) s = "";
+        StringBuilder o = new StringBuilder("\"");
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            switch (c) {
+                case '"': o.append("\\\""); break;
+                case '\\': o.append("\\\\"); break;
+                case '\n': o.append("\\n"); break;
+                case '\r': o.append("\\r"); break;
+                case '\t': o.append("\\t"); break;
+                default:
+                    if (c < 0x20) o.append(String.format("\\u%04x", (int) c));
+                    else o.append(c);
+            }
+        }
+        o.append("\"");
+        return o.toString();
+    }
+
     private String pendingJs = null;
 
     private void evalJs(String js) {
@@ -715,6 +766,24 @@ return true;
         @JavascriptInterface
         public void reportScreen(String tag) {
             Log.i("HPlayer-Screen", tag);
+        }
+
+        // ---- 软件更新（从 GitHub Releases 获取 APK） ----
+        @JavascriptInterface
+        public void checkUpdate() {
+            if (updater != null) updater.check();
+        }
+        @JavascriptInterface
+        public void startUpdate() {
+            if (updater != null) updater.downloadAndInstall();
+        }
+        @JavascriptInterface
+        public String getVersionName() {
+            try {
+                PackageManager pm = MainActivity.this.getPackageManager();
+                PackageInfo pi = pm.getPackageInfo(MainActivity.this.getPackageName(), 0);
+                return pi.versionName != null ? pi.versionName : "";
+            } catch (Exception e) { return ""; }
         }
     }
 }

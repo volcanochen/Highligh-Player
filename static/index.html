@@ -208,6 +208,19 @@
     <div class="set-sec">调试</div>
     <button class="primary-btn" id="btnTestVideo">▶ 加载测试视频</button>
     <p class="hint">没有 B 站链接时，用它端到端验证集锦播放链路。</p>
+
+    <div class="set-sec">关于</div>
+    <div class="set-row">
+      <span>当前版本</span>
+      <span id="curVer">检测中…</span>
+    </div>
+    <button class="primary-btn" id="btnCheckUpdate">检查更新</button>
+    <div id="updateStatus" class="set-status">点击「检查更新」从 GitHub 获取最新版本</div>
+    <progress id="updateProgress" value="0" max="100" hidden></progress>
+    <div class="set-row" id="updateActions" hidden>
+      <button class="primary-btn" id="btnDoUpdate">下载并安装</button>
+    </div>
+    <p class="hint" id="updateNotes"></p>
   </div>
 </div>
 

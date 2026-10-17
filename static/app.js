@@ -20,6 +20,9 @@ var el = {
   paneSegs: $('#paneSegs'), paneText: $('#paneText'),
   btnList: $('#btnList'), btnSet: $('#btnSet'),
   settings: $('#settings'), setClose: $('#setClose'),
+  curVer: $('#curVer'), btnCheckUpdate: $('#btnCheckUpdate'), updateStatus: $('#updateStatus'),
+  updateProgress: $('#updateProgress'), updateActions: $('#updateActions'), btnDoUpdate: $('#btnDoUpdate'),
+  updateNotes: $('#updateNotes'),
   text: $('#text'), parseInfo: $('#parseInfo'), replyStat: $('#replyStat'),
   padFront: $('#padFront'), padBack: $('#padBack'),
   btnFetchReplies: $('#btnFetchReplies'), btnDemo: $('#btnDemo'), btnClear: $('#btnClear'),
@@ -1546,6 +1549,7 @@ return;
   updateToggle();
   applyMute();
   bindGestures();
+  initUpdateUI();
   requestAnimationFrame(tick);
   fetch('/api/ping').then(function (r) {
     if (S.resolving) return;
@@ -1593,4 +1597,50 @@ setTimeout(function () { applyViewportScale(); reportDiag('layout-ready'); }, 40
   });
   window.addEventListener('pagehide', function () { savePosNow(); });
   loadFromNative();
+
+  /* ---------------------- 软件更新（从 GitHub Releases 升级） ---------------------- */
+  function initUpdateUI() {
+    if (el.curVer && window.BiliBridge && BiliBridge.getVersionName) {
+      try { el.curVer.textContent = BiliBridge.getVersionName() || '—'; } catch (e) { el.curVer.textContent = '—'; }
+    }
+    if (el.btnCheckUpdate) el.btnCheckUpdate.onclick = function () {
+      el.updateStatus.textContent = '正在检查更新…';
+      if (el.updateActions) el.updateActions.hidden = true;
+      if (el.updateProgress) el.updateProgress.hidden = true;
+      if (window.BiliBridge && BiliBridge.checkUpdate) BiliBridge.checkUpdate();
+    };
+    if (el.btnDoUpdate) el.btnDoUpdate.onclick = function () {
+      el.updateStatus.textContent = '正在下载…';
+      if (window.BiliBridge && BiliBridge.startUpdate) BiliBridge.startUpdate();
+    };
+  }
+
+  // 以下回调由原生端通过 evaluateJavascript 在全局作用域调用，必须挂在 window 上
+  window.onUpdateChecked = function (j) {
+    if (!j) return;
+    if (el.curVer) el.curVer.textContent = j.curVersion || '—';
+    if (j.hasUpdate) {
+      el.updateStatus.textContent = '发现新版本 ' + (j.latestVersion || '') + '（当前 ' + (j.curVersion || '') + '）';
+      if (el.updateActions) el.updateActions.hidden = false;
+      if (el.updateNotes) el.updateNotes.textContent = (j.notes || '').slice(0, 600);
+    } else {
+      el.updateStatus.textContent = '已是最新版本 ' + (j.curVersion || '');
+      if (el.updateActions) el.updateActions.hidden = true;
+    }
+  };
+  window.onUpdateProgress = function (pct) {
+    if (!el.updateProgress) return;
+    if (pct < 0) { el.updateProgress.hidden = true; return; }
+    el.updateProgress.hidden = false;
+    el.updateProgress.value = pct;
+    el.updateStatus.textContent = '下载中… ' + pct + '%';
+  };
+  window.onUpdateError = function (msg) {
+    if (el.updateStatus) el.updateStatus.textContent = '更新失败：' + (msg || '');
+    if (el.updateProgress) el.updateProgress.hidden = true;
+  };
+  window.onUpdateInstalled = function () {
+    if (el.updateStatus) el.updateStatus.textContent = '已启动安装，请按系统提示完成升级';
+    if (el.updateProgress) el.updateProgress.hidden = true;
+  };
 })();

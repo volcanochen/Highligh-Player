@@ -857,6 +857,63 @@ def c_settings_secondary(d):
 # ==========================================================================
 # 注册表：顺序 = 执行顺序（先基础能力，再播放，最后回归）
 # ==========================================================================
+def c_update_check(d):
+    '''特性：设置→关于→检查更新；有更新时能下载并触发安装。'''
+    r = CaseResult("检查更新+下载安装链路", "稳定性")
+    try:
+        d.cdp.js("""(function(){ var b=document.querySelector('#btnSet'); if(b) b.click(); return 'open'; })()""", timeout=10)
+    except Exception:
+        pass
+    time.sleep(0.5)
+    # 截获原生 evalJs 回调（不影响原 UI 逻辑，只在全局挂一份镜像供断言读取）
+    d.cdp.js("""(function(){
+      window.__upd = null; window.__pct = -1; window.__installed = false;
+      var _o = window.onUpdateChecked, _p = window.onUpdateProgress, _i = window.onUpdateInstalled;
+      window.onUpdateChecked = function(j){ window.__upd = j; if (_o) _o(j); };
+      window.onUpdateProgress = function(p){ window.__pct = p; if (_p) _p(p); };
+      window.onUpdateInstalled = function(){ window.__installed = true; if (_i) _i(); };
+      return 'hooked';
+    })()""", timeout=10)
+    clicked = d.cdp.js("""(function(){
+      var b = document.querySelector('#btnCheckUpdate');
+      if (!b) return 'no-btn';
+      b.click();
+      return 'clicked';
+    })()""", timeout=10)
+    if clicked != 'clicked':
+        return r.fail("找不到「检查更新」按钮（clicked=%s）" % clicked)
+    seen = None
+    deadline = time.time() + 35
+    while time.time() < deadline:
+        seen = d.cdp.js("window.__upd", timeout=10)
+        if isinstance(seen, dict) and seen:
+            break
+        time.sleep(1.0)
+    if not isinstance(seen, dict) or not seen:
+        return r.fail("35s 内未收到更新检查结果（可能无外网 / GitHub API 不可达 / 检查逻辑异常）")
+    cv = seen.get("curVersion")
+    if not cv:
+        return r.fail("检查结果缺少 curVersion，内容：%r" % (seen,))
+    if seen.get("hasUpdate"):
+        # 自动触发下载安装，验证 APK 能下载完成并拉起系统安装器
+        d.cdp.js("BiliBridge.startUpdate()", timeout=10)
+        ok = False; end = time.time() + 60
+        while time.time() < end:
+            pct = d.cdp.js("window.__pct", timeout=10)
+            inst = d.cdp.js("window.__installed", timeout=10)
+            if inst is True or (isinstance(pct, (int, float)) and pct >= 100):
+                ok = True
+                break
+            time.sleep(1.0)
+        if not ok:
+            return r.fail("下载/安装未达成（pct=%s installed=%s）" % (pct, inst))
+        return r.ok("发现新版本并下载完成、已触发系统安装（当前 v%s）" % cv,
+                    curVersion=cv, hasUpdate=True)
+    status = d.cdp.js("document.querySelector('#updateStatus').textContent", timeout=10)
+    return r.ok("检查更新正常：当前 v%s，状态「%s」" % (cv, status),
+                curVersion=cv, hasUpdate=False)
+
+
 CASES = [
     ("启动", c_app_launch),
     ("解析", c_resolve_cold),
@@ -885,4 +942,5 @@ CASES = [
     ("稳定性", c_error_ui),
     ("稳定性", c_no_js_error),
     ("稳定性", c_no_crash),
+    ("稳定性", c_update_check),
 ]

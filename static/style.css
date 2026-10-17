@@ -332,6 +332,14 @@ textarea#text:focus { border-color: var(--accent); }
 .hint {
   margin: 6px 0 0; font-size: 11px; color: var(--text-3); line-height: 1.5;
 }
+.set-status {
+  margin: 8px 0 0; font-size: 12px; color: var(--text-2); line-height: 1.5;
+  min-height: 16px; word-break: break-word;
+}
+#updateProgress {
+  display: block; width: 100%; margin: 8px 0 0; height: 6px;
+  accent-color: var(--accent, #2f80ed);
+}
 
 .seg-list { max-height: 260px; overflow-y: auto; margin: 0 -3px; padding: 0 3px; }
 .seg-list .empty {
